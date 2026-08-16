@@ -32,6 +32,12 @@ pub struct Profile {
     /// Everything `Operator::from_uri` needs, credentials included.
     #[serde(default)]
     pub options: BTreeMap<String, String>,
+    /// Credential *names* written by an older version of this app, when values
+    /// lived in the platform keychain. Kept only so the app can say why such a
+    /// connection stopped working — the values are not reachable any more. See
+    /// [`Self::orphaned_by_keychain_removal`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets: Vec<String>,
 }
 
 impl Profile {
@@ -41,6 +47,7 @@ impl Profile {
             name: name.into(),
             uri: uri.into(),
             options: BTreeMap::new(),
+            secrets: Vec::new(),
         }
     }
 
@@ -95,6 +102,20 @@ impl Profile {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect())
+    }
+
+    /// A profile written when credentials lived in the keychain, whose values are
+    /// therefore gone.
+    ///
+    /// Worth naming rather than letting the connection fail obscurely: the file
+    /// still lists what it needs, the value simply is not there any more, and the
+    /// only fix is to type it in again.
+    pub fn orphaned_by_keychain_removal(&self) -> Vec<&str> {
+        self.secrets
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|key| !self.options.contains_key(*key))
+            .collect()
     }
 
     /// Which of this profile's options hold credentials, for redaction.
@@ -233,10 +254,11 @@ impl ProfileStore {
         let parsed: ProfilesFile = toml::from_str(&text)
             .map_err(|e| Error::Config(format!("解析 {} 失败: {e}", self.path.display())))?;
 
-        for profile in &parsed.profiles {
-            profile.validate()?;
-        }
-
+        // Deliberately *not* validated here. A half-configured connection should
+        // still appear in the sidebar and explain itself when clicked — the
+        // previous behaviour returned `Err` for the whole file, so one profile
+        // missing a field made every other connection disappear. Validation
+        // happens at connect time, where it has somewhere to show the message.
         Ok(parsed.profiles)
     }
 
@@ -319,16 +341,30 @@ mod tests {
     }
 
     #[test]
-    fn a_required_field_missing_from_options_is_rejected() {
-        let mut profile = s3_profile();
-        profile.options.remove("secret_access_key");
-
+    fn a_structurally_required_option_is_still_rejected() {
+        // azblob cannot address anything without knowing the account, and that is
+        // not a credential — it is part of the address.
+        let profile = Profile::new("az", "Azure", "azblob://container/");
         let err = profile.validate().unwrap_err();
         assert!(
-            err.user_message().contains("Secret Access Key"),
+            err.user_message().contains("账户名"),
             "got {}",
             err.user_message()
         );
+    }
+
+    #[test]
+    fn an_s3_profile_with_no_credentials_is_valid() {
+        // Regression: requiring static keys broke a real profile named
+        // "s3-iam-dev". S3 reads credentials from an IAM role, the instance
+        // metadata service or the environment, so a profile carrying none is a
+        // normal configuration — not an incomplete one.
+        let mut profile = Profile::new("iam", "IAM dev", "s3://bucket/");
+        // Region is required for a different reason — OpenDAL's builder cannot
+        // proceed without it — so a realistic IAM profile has one and no keys.
+        profile.options.insert("region".into(), "us-east-1".into());
+
+        profile.validate().unwrap();
     }
 
     #[test]
@@ -363,16 +399,27 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_credential_fails_loudly_at_connect_time() {
-        let mut profile = s3_profile();
-        profile.options.remove("secret_access_key");
+    fn a_profile_written_for_the_keychain_says_what_it_lost() {
+        // What the user's own config looked like: credential *names* recorded,
+        // values in the keychain we no longer read. The connection cannot work,
+        // and the only honest thing is to name the fields that have to be typed
+        // in again rather than fail with something obscure.
+        let mut profile = Profile::new("old", "Prod S3", "s3://bucket/");
+        profile.secrets = vec!["access_key_id".into(), "secret_access_key".into()];
 
-        let err = profile.connect_options().unwrap_err();
-        assert!(
-            err.user_message().contains("Secret Access Key"),
-            "got {}",
-            err.user_message()
+        assert_eq!(
+            profile.orphaned_by_keychain_removal(),
+            vec!["access_key_id", "secret_access_key"]
         );
+
+        // Once re-entered, nothing is orphaned any more.
+        profile
+            .options
+            .insert("access_key_id".into(), "AKIA".into());
+        profile
+            .options
+            .insert("secret_access_key".into(), "shhh".into());
+        assert!(profile.orphaned_by_keychain_removal().is_empty());
     }
 
     #[test]
@@ -471,6 +518,57 @@ mod tests {
 
         ProfileStore::at(&path).save(&[profile]).unwrap();
         assert!(path.exists());
+    }
+
+    #[test]
+    fn one_unusable_profile_does_not_hide_the_others() {
+        // Regression: `load` used to validate and return `Err` for the whole
+        // file, so a single connection missing a field made *every* saved
+        // connection disappear from the sidebar. Loading now reads what is there;
+        // connecting is where a bad profile explains itself.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[profile]]
+id = "half"
+name = "半个连接"
+uri = "azblob://container/"
+
+[[profile]]
+id = "good"
+name = "本机"
+uri = "fs:///tmp"
+"#,
+        )
+        .unwrap();
+
+        let profiles = ProfileStore::at(&path).load().unwrap();
+        assert_eq!(profiles.len(), 2, "both must survive loading");
+        // And the broken one still refuses to connect, with a reason.
+        assert!(profiles[0].validate().is_err());
+        profiles[1].validate().unwrap();
+    }
+
+    #[test]
+    fn a_legacy_secrets_list_survives_a_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[profile]]
+id = "s3-iam-dev"
+name = "IAM dev"
+uri = "s3://s3-iam-dev/"
+secrets = ["access_key_id", "secret_access_key"]
+"#,
+        )
+        .unwrap();
+
+        let profiles = ProfileStore::at(&path).load().unwrap();
+        assert_eq!(profiles[0].orphaned_by_keychain_removal().len(), 2);
     }
 
     #[cfg(unix)]

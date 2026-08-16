@@ -240,7 +240,7 @@ impl TransferPanel {
                     .w(px(160.))
                     .flex_none()
                     .when_some(task.fraction(), |el, fraction| {
-                        el.child(Progress::new().value(fraction * 100.))
+                        el.child(Progress::new("task-progress").value(fraction * 100.))
                     })
                     // Without a total there is nothing honest to draw, so show
                     // the byte count only.

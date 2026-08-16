@@ -36,22 +36,27 @@ boundary through `roam_core::rt::Rt::spawn`. See `docs/DESIGN.md` §2.
 ## Tests
 
 ```
-cargo test --workspace          # 318 pass; 272 are real, 46 skip (see below)
+cargo test -p roam-core         # 229 pass
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
-272 of those need nothing but a compiler: 171 in `roam-core`, 94 views, 7 scale.
-The other 46 are the backend integration tests, which report success by skipping
-when no server is configured — `scripts/test-backends.sh` is what makes them run
-for real.
+`roam-core` carries 229 tests: 176 unit, 46 backend integration tests that report
+success by skipping when no server is configured (`scripts/test-backends.sh` is
+what makes them run for real), and 7 scale tests.
 
-The offline suite covers the whole app, including the views: UI tests drive real
-GPUI views with `TestAppContext` and dispatch real keystrokes. It also rasterises
-every icon with the same `resvg` gpui uses and asserts each one puts ink on the
-page — `gpui-component` names its icons but ships none of them, and both layers
-below fail silently, so a missing asset source renders every icon in the app as
-empty space. See `docs/DESIGN.md`.
+> **`cargo test -p roam-ui` currently fails on macOS — 75 of its 92 tests.** Not
+> our code: `Root::new` installs a macOS accessibility hook that needs a real
+> `NSView`, and gpui's test window answers with `unimplemented!()` instead of the
+> `Err` its trait allows. Every test that builds a `Root` panics. The app itself is
+> unaffected — a real window has a real view. See `docs/DESIGN.md` for the full
+> chain and why there is no fix on our side short of forking a dependency.
+
+The view tests, when they can run, drive real GPUI views with `TestAppContext` and
+dispatch real keystrokes. They also rasterise every icon the views name, with the
+same `resvg` gpui uses, and assert each one puts ink on the page. Upstream ships
+the icons now (`gpui-component-assets`), but an application that registers no
+asset source still gets *nothing drawn*, silently, so the check stays.
 
 Two things it cannot cover, so both have their own path:
 

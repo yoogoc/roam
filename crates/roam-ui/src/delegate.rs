@@ -148,8 +148,11 @@ impl TableDelegate for EntriesDelegate {
         self.view.len()
     }
 
-    fn column(&self, col_ix: usize, _: &App) -> &Column {
-        &self.columns[col_ix]
+    // Returns by value now (upstream changed the trait). We still own the
+    // columns — the sort arrow reads from them — so this is a clone of a small
+    // descriptor, not of any row data.
+    fn column(&self, col_ix: usize, _: &App) -> Column {
+        self.columns[col_ix].clone()
     }
 
     fn loading(&self, _: &App) -> bool {

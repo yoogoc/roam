@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use gpui::{
-    AnyView, App, AppContext, Application, Bounds, TitlebarOptions, Window, WindowBounds,
-    WindowOptions, px, size,
+    AnyView, App, AppContext, Bounds, TitlebarOptions, Window, WindowBounds, WindowOptions, px,
+    size,
 };
 use gpui_component::Root;
 use roam_core::{ProfileStore, Rt, Vfs};
@@ -47,7 +47,7 @@ fn main() -> Result<()> {
 
     tracing::info!(root = %root, profiles = %store.path().display(), "opening roam");
 
-    Application::new()
+    gpui_platform::application()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);

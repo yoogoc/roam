@@ -1,58 +1,38 @@
 //! The application's asset source.
 //!
 //! gpui-component names its icons by relative path — `IconName::ArrowLeft`
-//! resolves to `icons/arrow-left.svg` — but the crate does **not** ship the SVG
-//! files. Supplying them is the application's job, and the failure mode when it
-//! doesn't is silent in both layers:
+//! resolves to `icons/arrow-left.svg` — and an application that supplies no
+//! asset source gets *nothing drawn*, silently, in both layers:
 //!
-//! 1. `Application::new()` installs `()` as the asset source, whose `load()`
-//!    answers every path with `Ok(None)`.
+//! 1. `Application` installs `()` as the asset source unless told otherwise, and
+//!    its `load()` answers every path with `Ok(None)`.
 //! 2. gpui's svg renderer treats `Ok(None)` as "nothing to draw" and returns
 //!    without a log line or an error.
 //!
-//! So every icon in the app renders as empty space. On a `.ghost()` icon-only
-//! button that leaves nothing at all to see until the pointer hovers and paints
-//! a background — which is exactly how the bug was reported: "the button only
+//! Every icon in the app then renders as empty space. On a `.ghost()` icon-only
+//! button that leaves nothing to see until the pointer hovers and paints a
+//! background — which is how the bug was originally reported: "the button only
 //! appears when the mouse passes over it".
 //!
-//! The icons are lucide (ISC), plus the handful gpui-component defines itself
-//! that lucide has no equivalent for; see `assets/icons/ATTRIBUTION.md`.
+//! The icons used to be vendored here, 86 of them, because the published
+//! gpui-component shipped none. Upstream's git version does ship them
+//! (`gpui-component-assets`), so this is now a re-export — but the tests stay.
+//! Nothing checking was the reason the icons went missing in the first place, and
+//! that is just as true of someone else's asset crate as of our own.
 
-use std::borrow::Cow;
-
-use gpui::{AssetSource, Result, SharedString};
-use rust_embed::RustEmbed;
-
-/// Embeds `crates/roam-ui/assets/` into the binary, so a built app has its icons
-/// wherever it runs — no directory to install next to the executable.
-#[derive(RustEmbed)]
-#[folder = "assets/"]
-#[include = "icons/*.svg"]
-pub struct Assets;
-
-impl AssetSource for Assets {
-    fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        Ok(Self::get(path).map(|file| file.data))
-    }
-
-    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        Ok(Self::iter()
-            .filter(|p| p.starts_with(path))
-            .map(|p| SharedString::from(p.to_string()))
-            .collect())
-    }
-}
+pub use gpui_component_assets::Assets;
 
 #[cfg(test)]
 mod tests {
+    use gpui::AssetSource;
     use gpui_component::{IconName, IconNamed};
     use resvg::usvg;
 
     use super::*;
 
     /// Every icon our own views reference, derived from the sources so the test
-    /// cannot drift out of date: a view that starts using an icon we never
-    /// vendored fails here, at the one place that can still explain why. Left to
+    /// cannot drift out of date: a view that starts using an icon upstream does
+    /// not ship fails here, at the one place that can still explain why. Left to
     /// itself the only symptom is invisible-but-clickable space in a running app.
     ///
     /// Several are reachable only through a conditional — `Sun`/`Moon` on the
@@ -112,10 +92,12 @@ mod tests {
         );
 
         for path in paths {
-            let loaded = Assets.load(&path).expect("asset source");
+            let loaded = Assets
+                .load(&path)
+                .unwrap_or_else(|e| panic!("{path} is not shipped upstream: {e}"));
             assert!(
                 loaded.is_some_and(|bytes| !bytes.is_empty()),
-                "{path} is missing from assets/, so it would render as empty space"
+                "{path} resolved to nothing, so it would render as empty space"
             );
         }
     }
@@ -130,40 +112,29 @@ mod tests {
         assert_eq!(IconName::Plus.path(), "icons/plus.svg");
     }
 
-    /// gpui-component renders icons we never name ourselves — the table's sort
-    /// arrows, a dialog's close button, the scrollbar's resize corner. Those go
-    /// through the same asset source, so the vendored set has to cover every
-    /// path the component library can ask for, not just ours.
+    /// Upstream's asset source reports a missing path as an **error**, where ours
+    /// returned `Ok(None)` and gpui's default still does. That is the better of
+    /// the two — `Ok(None)` is exactly the silence this module exists to document
+    /// — so it is worth pinning: if it ever softens back to `Ok(None)`, a missing
+    /// icon goes quiet again.
     #[test]
-    fn the_vendored_set_covers_all_of_gpui_components_icons() {
-        let count = Assets::iter().count();
-        assert_eq!(
-            count, 86,
-            "gpui-component 0.5.1 references 86 icon paths; \
-             assets/icons has {count}. If the dependency changed, re-derive the \
-             list from its icon.rs and vendor what is missing."
+    fn a_path_that_does_not_exist_is_loud() {
+        assert!(
+            Assets.load("icons/not-a-real-icon.svg").is_err(),
+            "a missing icon must not resolve quietly"
         );
-    }
-
-    #[test]
-    fn a_path_we_never_vendored_reports_missing_rather_than_empty_bytes() {
-        // Guards the distinction the bug hinged on: `Ok(None)` is silent, so the
-        // asset source must be the layer that can tell us a path is unknown.
-        assert!(Assets.load("icons/not-a-real-icon.svg").unwrap().is_none());
     }
 
     /// Resolving a path is not the same as drawing something. gpui rasterises an
     /// svg and keeps only the alpha channel, so a file that parses but covers no
     /// pixels is *still* an invisible button — the very symptom this module
-    /// exists to prevent. This renders every icon the way gpui does and asserts
-    /// there is ink on the page, which is what makes the ten hand-drawn ones
-    /// trustworthy.
+    /// exists to prevent.
     #[test]
-    fn every_icon_rasterises_to_visible_pixels() {
+    fn every_icon_we_use_rasterises_to_visible_pixels() {
         let options = usvg::Options::default();
 
-        for path in Assets::iter() {
-            let bytes = Assets.load(&path).unwrap().expect("embedded");
+        for path in icon_paths_referenced_by_our_sources() {
+            let bytes = Assets.load(&path).unwrap().expect("shipped");
             let tree = usvg::Tree::from_data(&bytes, &options)
                 .unwrap_or_else(|e| panic!("{path} does not parse as svg: {e}"));
 
@@ -177,8 +148,7 @@ mod tests {
             );
 
             let inked = pixmap.pixels().iter().filter(|p| p.alpha() > 0).count();
-            let total = pixmap.pixels().len();
-            let coverage = inked as f32 / total as f32;
+            let coverage = inked as f32 / pixmap.pixels().len() as f32;
 
             assert!(
                 coverage > 0.02,
@@ -193,12 +163,5 @@ mod tests {
                 coverage * 100.0
             );
         }
-    }
-
-    #[test]
-    fn listing_returns_the_icon_directory() {
-        let listed = Assets.list("icons/").unwrap();
-        assert_eq!(listed.len(), 86);
-        assert!(listed.iter().all(|p| p.ends_with(".svg")));
     }
 }

@@ -9,12 +9,15 @@ description = "GPUI view layer for Roam"
 roam-core.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
+gpui-component-assets.workspace = true
 rust-embed.workspace = true
 jiff.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-gpui = { version = "0.2.2", features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }
+# Only the examples need it — they are the ones that start an app.
+gpui_platform.workspace = true
 tempfile = "3"
 # The same rasteriser gpui renders svgs with (it keeps its `SvgRenderer` private),
 # so the icon test exercises the real parse-and-draw path rather than a stand-in.

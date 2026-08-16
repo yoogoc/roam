@@ -178,7 +178,7 @@ impl PreviewPanel {
             )
     }
 
-    fn render_body(&self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+    fn render_body(&self, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let note = |text: &str, cx: &mut gpui::Context<Self>| {
             h_flex()
                 .size_full()
@@ -220,7 +220,7 @@ impl PreviewPanel {
                         .min_h_0()
                         .p_3()
                         .overflow_y_scrollbar()
-                        .child(TextView::markdown("preview-md", body.clone(), window, cx)),
+                        .child(TextView::markdown("preview-md", body.clone())),
                 )
                 .when(*truncated, |el| el.child(truncation_note(cx)))
                 .into_any_element(),
@@ -297,7 +297,7 @@ fn image_format(kind: ImageKind) -> ImageFormat {
 }
 
 impl Render for PreviewPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         v_flex()
             .w(px(320.))
             .flex_none()
@@ -308,6 +308,6 @@ impl Render for PreviewPanel {
             .when_some(self.entry.clone(), |el, entry| {
                 el.child(self.render_meta(&entry, cx))
             })
-            .child(div().flex_1().min_h_0().child(self.render_body(window, cx)))
+            .child(div().flex_1().min_h_0().child(self.render_body(cx)))
     }
 }

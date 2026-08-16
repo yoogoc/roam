@@ -11,7 +11,7 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_component::dialog::DialogButtonProps;
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::table::{Table, TableEvent, TableState};
+use gpui_component::table::{DataTable, TableEvent, TableState};
 use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable, WindowExt,
     breadcrumb::Breadcrumb, breadcrumb::BreadcrumbItem, h_flex, v_flex,
@@ -247,7 +247,7 @@ impl Browser {
 
                     let message = match signed {
                         Ok(Some(url)) => {
-                            let _ = cx.update(|cx| {
+                            cx.update(|cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(url));
                             });
                             "已复制分享链接（10 分钟内有效）".to_string()
@@ -665,7 +665,8 @@ impl Browser {
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("创建")
-                        .cancel_text("取消"),
+                        .cancel_text("取消")
+                        .show_cancel(true),
                 )
                 .child(Input::new(&dialog.input))
                 .on_ok(move |_, window, cx| {
@@ -714,7 +715,8 @@ impl Browser {
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("重命名")
-                        .cancel_text("取消"),
+                        .cancel_text("取消")
+                        .show_cancel(true),
                 )
                 .child(Input::new(&dialog.input))
                 .on_ok(move |_, window, cx| {
@@ -906,7 +908,11 @@ impl Browser {
             builder
                 .title(title.clone())
                 .w(px(560.))
-                .button_props(DialogButtonProps::default().cancel_text("关闭"))
+                .button_props(
+                    DialogButtonProps::default()
+                        .cancel_text("关闭")
+                        .show_cancel(true),
+                )
                 .child(render_versions(&versions, &entry, this))
         });
     }
@@ -948,12 +954,17 @@ impl Browser {
             builder
                 .title(title.clone())
                 .w(px(440.))
-                .confirm()
+                // `confirm()` used to bundle these three. Deleting is the one
+                // irreversible action here, so it keeps them: no dismissing by
+                // clicking the backdrop, and no bare X that reads as "cancel".
+                .overlay_closable(false)
+                .close_button(false)
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("删除")
                         .ok_variant(ButtonVariant::Danger)
-                        .cancel_text("取消"),
+                        .cancel_text("取消")
+                        .show_cancel(true),
                 )
                 .child(div().text_sm().child(body.clone()))
                 .on_ok(move |_, window, cx| {
@@ -1227,7 +1238,7 @@ impl Render for Browser {
                                     this.upload_dropped(paths.paths().to_vec(), window, cx);
                                 },
                             ))
-                            .child(Table::new(&self.table).stripe(true)),
+                            .child(DataTable::new(&self.table).stripe(true)),
                     )
                     .when(self.preview_open, |el| el.child(self.preview.clone())),
             )
@@ -1374,6 +1385,10 @@ pub(crate) mod tests {
                     );
                     let browser = cx.new(|cx| Browser::new(vfs, engine, window, cx));
                     *holder.borrow_mut() = Some(browser.clone());
+                    // Wrapped in `Root` on purpose: `push_notification` and the
+                    // dialog layer both reach for it, and main.rs has the same
+                    // shape. On macOS this currently panics under gpui's test
+                    // platform — an upstream defect, see docs/DESIGN.md.
                     gpui_component::Root::new(gpui::AnyView::from(browser), window, cx)
                 })
             };
@@ -1517,7 +1532,7 @@ pub(crate) mod tests {
             let browser = self.browser.clone();
             self.cx.update(|window, cx| {
                 let handle = browser.read(cx).focus.clone();
-                window.focus(&handle);
+                window.focus(&handle, cx);
             });
             self.cx.run_until_parked();
         }

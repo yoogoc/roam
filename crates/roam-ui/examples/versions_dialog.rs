@@ -8,9 +8,7 @@
 
 use std::sync::Arc;
 
-use gpui::{
-    AnyView, App, AppContext, Application, Bounds, Window, WindowBounds, WindowOptions, px, size,
-};
+use gpui::{AnyView, App, AppContext, Bounds, Window, WindowBounds, WindowOptions, px, size};
 use gpui_component::Root;
 use roam_core::transfer::DEFAULT_CONCURRENCY;
 use roam_core::{DirEntry, EntryKind, ObjectVersion, Rt, TransferEngine, Vfs};
@@ -62,7 +60,7 @@ fn main() {
 
     let _keep = dir;
 
-    Application::new()
+    gpui_platform::application()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);

@@ -820,6 +820,34 @@ scale 在容器里比 macOS 慢（13.3 ms / 3.12 s，对 6.08 ms / 1.16 s），�
 
 **仍未验证的**：这是 `act` 在 arm64 Linux 容器里跑的，不是 GitHub 托管的 x86_64 `ubuntu-latest`；`Swatinem/rust-cache` 在本地没有 cache 服务，实际是空转。**`ui` job 用 act 验证没有意义** —— act 没有 macOS runner 镜像，它会去问「用哪个 Linux 镜像」，而拿 Linux 跑 gpui 只会给出一个假通过；不过那个 job 的宿主就是 macOS，它的每条命令本来就在本机直接跑过。
 
+### 升级到 gpui-component git main：UI 测试在 macOS 上被上游挡住
+
+依赖已切到上游 main（`gpui-component` / `gpui-base` / `gpui-component-assets` @ `bd83329`，`gpui` / `gpui_platform` 来自 zed @ `bc538de`）。**app 本身正常**：构建通过、真机跑起来、窗口在屏、`roam-core` 229 个测试全绿。
+
+但 `roam-ui` 的 92 个测试里有 75 个在 macOS 上 panic：
+
+```
+not implemented: Test Windows are not backed by a real platform window
+  gpui::platform::test::window: <TestWindow as HasWindowHandle>::window_handle
+  gpui_base::macos_accessibility::install_window_hit_test_forwarder
+  gpui_component::root::Root::new          ← 每个建 Root 的测试都会走到
+```
+
+链条是清楚的：`Root::new` 在 macOS 上装一个无障碍 hit-test 转发器，需要真实 NSView；gpui 的测试窗口没有，于是 `unimplemented!()`。
+
+**两边各有一处问题，而且都不在我们这边：**
+
+- 上游 gpui-component 其实**写得很稳**：`ns_view()` 用的是 `HasWindowHandle::window_handle(window).ok()?`，本来就容错。是 **zed 的 `TestWindow` 用 `unimplemented!()` panic，而不是按 trait 契约返回 `Err`** —— 一共两行（`platform/test/window.rs:55` 与 `:63`）。zed 当前 `origin/main` 上这两行依然如此，所以升级 zed 也解决不了。
+- 上游确实加了守卫 `#[cfg(all(target_os = "macos", not(test)))]`，但 **`cfg(test)` 是按 crate 生效的**：gpui-base 作为我们测试二进制的普通依赖被编译时并没有 `test`，所以那个守卫只保护上游自己的单测，保护不到任何下游使用者。
+
+**为什么没有免 fork 的绕法**（都查过了）：`Root::new` 是唯一构造入口；gpui-component / gpui-base 都没有可关掉无障碍的 feature；`TestAppContext::build` 里 `TestPlatform` 是硬编码的，不能注入平台；去掉脚手架里的 `Root` 会伤到大半测试 —— `connect`、`delete_entry`、`create_folder`、`rename_entry`、`download`、`save_form` 这些核心路径都会推送通知或开对话框，全都要求窗口第一层是 `Root`。
+
+按 cfg 推断，**Linux 上不受影响**（那段整体是 `cfg(target_os = "macos")`）——但这一条**未验证**，在容器里构建 Linux 版 gpui 需要 x11/wayland 等系统库，没有实际跑过。
+
+**处理方式(用户选择：保留 git main，等上游修)**：CI 的 macOS `ui` job 把 `cargo test --workspace` 标为 `continue-on-error`，并在它后面加了一条**强制**的 `cargo test --workspace --no-run`。理由是后者仍然会编译每个视图和两个测试脚手架 —— 也就是说 roam-ui 里的编译回归照样会让 CI 失败，不会躲在这个已知问题后面。这一点是验过的：故意在一个视图里塞一个不存在的类型，`--no-run` 报 4 个错误；还原后归零。
+
+用 `continue-on-error` 而不是删掉那一步，是为了让它继续跑：上游哪天修好，这一步会自己变绿，不需要谁记得回来打开它。
+
 ### 两个测试抓出来的真问题
 
 1. **`connect_local` 从 `browser.vfs()` 取本机 session** —— 但切到远端后那已经是远端的 Vfs，"回到本机" 实际上在重新列举远端。Workspace 必须自己保留本机 Vfs。

@@ -1151,15 +1151,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_missing_credential_stops_the_session_from_being_built() {
-        // Nothing but a URI: the service schema says S3 cannot connect without
-        // keys, so this has to fail here rather than as an opaque 403 later.
-        let profile = crate::Profile::new("prod", "Prod S3", "s3://bucket/prefix");
+    async fn a_session_builds_without_static_credentials() {
+        // Nothing but a URI. This must succeed: S3 credentials can come from an
+        // IAM role or the environment, and demanding them here broke a real
+        // profile that had none.
+        let mut profile = crate::Profile::new("prod", "Prod S3", "s3://bucket/prefix");
+        // Region is not a credential — OpenDAL's builder needs it regardless —
+        // so a realistic IAM-role profile still carries one.
+        profile.options.insert("region".into(), "us-east-1".into());
+
+        Vfs::from_profile(Rt::from_current().unwrap(), &profile).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_structurally_incomplete_profile_stops_the_session() {
+        // The other half of the same rule: what is missing here is not a
+        // credential but part of the address, so it cannot be filled in by the
+        // environment and has to fail before any request is made.
+        let profile = crate::Profile::new("az", "Azure", "azblob://container/");
 
         let err = Vfs::from_profile(Rt::from_current().unwrap(), &profile).unwrap_err();
 
         assert!(
-            err.user_message().contains("Access Key ID"),
+            err.user_message().contains("账户名"),
             "should name the missing field: {}",
             err.user_message()
         );

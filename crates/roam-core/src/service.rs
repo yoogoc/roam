@@ -167,11 +167,21 @@ pub static SERVICES: &[Service] = &[
                 .required(),
             Field::text("prefix", "前缀", "可选，例如 team/reports").prefix(),
             Field::text("endpoint", "Endpoint", "自建或兼容服务填写，AWS 可留空"),
-            Field::text("region", "区域", "例如 us-east-1"),
-            Field::text("access_key_id", "Access Key ID", "").required(),
-            Field::text("secret_access_key", "Secret Access Key", "")
-                .secret()
-                .required(),
+            // Required, unlike the credentials: OpenDAL's S3 builder fails with
+            // "region is missing" before any request, and it cannot be inferred
+            // from an IAM role the way keys can.
+            Field::text("region", "区域", "例如 us-east-1").required(),
+            Field::text(
+                "access_key_id",
+                "Access Key ID",
+                "留空则使用环境变量或 IAM 角色",
+            ),
+            Field::text(
+                "secret_access_key",
+                "Secret Access Key",
+                "留空则使用环境变量或 IAM 角色",
+            )
+            .secret(),
             Field::text(
                 "enable_virtual_host_style",
                 "使用 virtual-host 寻址",
@@ -189,9 +199,7 @@ pub static SERVICES: &[Service] = &[
                 .required(),
             Field::text("prefix", "前缀", "可选").prefix(),
             Field::text("endpoint", "Endpoint", "使用模拟器时填写，正式环境留空"),
-            Field::text("token", "访问令牌", "OAuth2 token")
-                .secret()
-                .required(),
+            Field::text("token", "访问令牌", "OAuth2 token，留空则使用默认凭据").secret(),
         ],
     },
     Service {
@@ -203,9 +211,7 @@ pub static SERVICES: &[Service] = &[
                 .required(),
             Field::text("prefix", "前缀", "可选").prefix(),
             Field::text("account_name", "账户名", "storage account 名称").required(),
-            Field::text("account_key", "账户密钥", "")
-                .secret()
-                .required(),
+            Field::text("account_key", "账户密钥", "留空则使用 SAS 或 AAD").secret(),
             Field::text("endpoint", "Endpoint", "使用 Azurite 时填写，正式环境留空"),
         ],
     },
@@ -228,9 +234,7 @@ pub static SERVICES: &[Service] = &[
                 .prefix()
                 .absolute(),
             Field::text("user", "用户名", "").required(),
-            Field::text("key", "私钥文件", "本机路径，SFTP 需要密钥在磁盘上")
-                .path()
-                .required(),
+            Field::text("key", "私钥文件", "本机路径；留空则使用 ssh-agent").path(),
             Field::text(
                 "known_hosts_strategy",
                 "接受未知主机密钥",
@@ -294,6 +298,8 @@ pub fn build_profile(
         name,
         uri: format!("{scheme}://{host}/{prefix}"),
         options,
+        // The form never produces one of these; only an old config file has them.
+        secrets: Vec::new(),
     };
     profile.validate()?;
     Ok(profile)
@@ -372,6 +378,7 @@ mod tests {
             &values(&[
                 ("bucket", "roam-test"),
                 ("prefix", "team/reports"),
+                ("region", "us-east-1"),
                 ("access_key_id", "key"),
                 ("secret_access_key", "secret"),
             ]),
@@ -380,8 +387,8 @@ mod tests {
 
         assert_eq!(profile.uri, "s3://roam-test/team/reports");
         assert_eq!(profile.options.get("access_key_id").unwrap(), "key");
-        // Not written as an empty string — absent.
-        assert!(!profile.options.contains_key("region"));
+        // An optional field left blank is absent, not written as "".
+        assert!(!profile.options.contains_key("endpoint"));
     }
 
     #[test]
@@ -419,11 +426,30 @@ mod tests {
 
     #[test]
     fn a_missing_required_field_names_itself() {
-        let err = build_profile("p".into(), "n".into(), "s3", &values(&[("bucket", "b")]))
+        // WebDAV has no host in its URI, so the endpoint is the one thing it
+        // cannot be built without.
+        let err = build_profile("p".into(), "n".into(), "webdav", &values(&[]))
             .unwrap_err()
             .user_message();
 
-        assert!(err.contains("Access Key ID"), "unhelpful message: {err}");
+        assert!(err.contains("服务地址"), "unhelpful message: {err}");
+    }
+
+    #[test]
+    fn credentials_are_optional_because_the_environment_can_supply_them() {
+        // Regression for a real profile named "s3-iam-dev": S3 reads credentials
+        // from an IAM role or the environment, so a form filled in with only a
+        // bucket has to produce a valid profile.
+        let profile = build_profile(
+            "p".into(),
+            "IAM dev".into(),
+            "s3",
+            &values(&[("bucket", "b"), ("region", "us-east-1")]),
+        )
+        .unwrap();
+
+        assert_eq!(profile.uri, "s3://b/");
+        assert!(!profile.options.contains_key("access_key_id"));
     }
 
     #[test]
@@ -435,6 +461,7 @@ mod tests {
             &values(&[
                 ("bucket", "b"),
                 ("prefix", "p/q"),
+                ("region", "us-east-1"),
                 ("endpoint", "http://127.0.0.1:9000"),
                 ("access_key_id", "key"),
                 ("secret_access_key", "secret"),
@@ -530,6 +557,7 @@ mod round_trip_tests {
     #[test]
     fn a_toggle_turned_on_is_written() {
         let mut values = field_values(&Profile::new("p", "n", "s3://b/"));
+        values.insert("region".into(), "us-east-1".into());
         values.insert("access_key_id".into(), "k".into());
         values.insert("secret_access_key".into(), "s".into());
         values.insert("enable_virtual_host_style".into(), "true".into());

@@ -13,6 +13,7 @@ path = "src/main.rs"
 roam-core.workspace = true
 roam-ui.workspace = true
 gpui.workspace = true
+gpui_platform.workspace = true
 gpui-component.workspace = true
 tokio.workspace = true
 anyhow.workspace = true

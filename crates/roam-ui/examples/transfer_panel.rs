@@ -10,9 +10,7 @@
 
 use std::sync::Arc;
 
-use gpui::{
-    AnyView, App, AppContext, Application, Bounds, Window, WindowBounds, WindowOptions, px, size,
-};
+use gpui::{AnyView, App, AppContext, Bounds, Window, WindowBounds, WindowOptions, px, size};
 use gpui_component::Root;
 use roam_core::transfer::{DEFAULT_CONCURRENCY, Transfer};
 use roam_core::{Rt, TransferEngine, Vfs};
@@ -51,7 +49,7 @@ fn main() {
     // Keep the temp dirs alive for the life of the process.
     let _keep = (target, source);
 
-    Application::new()
+    gpui_platform::application()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);

@@ -86,13 +86,38 @@ impl Workspace {
 
         // A broken profiles.toml must not stop the app from opening — surface
         // it and carry on with the local session.
-        let (profiles, error) = match store.load() {
+        let (profiles, mut error) = match store.load() {
             Ok(profiles) => (profiles, None),
             Err(err) => {
                 tracing::warn!(error = %err.user_message(), "failed to load profiles");
                 (Vec::new(), Some(err))
             }
         };
+
+        // A connection saved by an older build kept its credentials in the
+        // platform keychain, which this version no longer reads. Say so on the
+        // banner: the alternative is a connection that looks fine and fails with
+        // a permission error whose cause is invisible.
+        if error.is_none() {
+            let orphaned: Vec<String> = profiles
+                .iter()
+                .filter(|p| !p.orphaned_by_keychain_removal().is_empty())
+                .map(|p| {
+                    format!(
+                        "{}（{}）",
+                        p.name,
+                        p.orphaned_by_keychain_removal().join("、")
+                    )
+                })
+                .collect();
+
+            if !orphaned.is_empty() {
+                error = Some(Error::Config(format!(
+                    "以下连接的凭据原先存放在系统钥匙串中，本版本不再读取，请重新填写：{}",
+                    orphaned.join("；")
+                )));
+            }
+        }
 
         let mut this = Self {
             rt,
@@ -349,7 +374,8 @@ impl Workspace {
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("保存")
-                        .cancel_text("取消"),
+                        .cancel_text("取消")
+                        .show_cancel(true),
                 )
                 .child(form.clone())
                 .on_ok(move |_, window, cx| {
