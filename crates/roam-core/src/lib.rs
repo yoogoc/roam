@@ -31,7 +31,7 @@ pub use rt::Rt;
 pub use service::{Field, FieldKind, Role, Service};
 pub use transfer::{
     Operation, TaskId, TaskProgress, TaskSnapshot, TaskState, Transfer, TransferEngine,
-    plan_download, plan_duplicate_dir, plan_move_dir, plan_upload,
+    TransferOverview, plan_download, plan_duplicate_dir, plan_move_dir, plan_upload,
 };
 pub use tree::{DirTree, TreeRow};
 pub use vfs::{Listing, Vfs};

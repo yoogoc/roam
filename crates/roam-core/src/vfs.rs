@@ -929,6 +929,25 @@ impl Vfs {
         Ok(out)
     }
 
+    /// Just the subdirectory paths, discarding files as they stream past.
+    ///
+    /// The sidebar tree only ever wants directories. Going through
+    /// [`Vfs::list_all`] made expanding a folder of 100k files allocate 100k
+    /// `DirEntry` — each with several `Arc<str>` — purely to throw almost all of
+    /// them away. Peak memory here is one batch rather than the whole directory.
+    pub async fn list_dirs(&self, path: &str) -> Result<Vec<Arc<str>>> {
+        let mut listing = self.list(path);
+        let mut out = Vec::new();
+        while let Some(batch) = listing.next_batch().await {
+            for entry in batch? {
+                if entry.is_dir() {
+                    out.push(entry.path.clone());
+                }
+            }
+        }
+        Ok(out)
+    }
+
     pub fn stat(
         &self,
         path: &str,

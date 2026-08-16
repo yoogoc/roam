@@ -8,7 +8,7 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::progress::Progress;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Sizable, h_flex, v_flex};
-use roam_core::transfer::{TaskSnapshot, TaskState};
+use roam_core::transfer::{TaskSnapshot, TaskState, TransferOverview};
 use roam_core::{TransferEngine, fmt};
 
 /// Progress repaint interval — about 10Hz.
@@ -18,10 +18,19 @@ use roam_core::{TransferEngine, fmt};
 /// more time drawing the panel than moving bytes.
 const POLL: Duration = Duration::from_millis(100);
 
+/// How many rows the panel draws. Dropping a folder makes one task per file, so
+/// the list has always been capped — what changed is that the engine is no longer
+/// asked to describe the rest.
+const VISIBLE_ROWS: usize = 50;
+
 /// The bottom transfer panel: one row per task, with progress and a cancel.
 pub struct TransferPanel {
     engine: TransferEngine,
-    tasks: Vec<TaskSnapshot>,
+    /// Counts over every task plus the newest [`VISIBLE_ROWS`]. Polled at 10 Hz
+    /// while transfers run, which is why it must not be proportional to the task
+    /// count: 100k queued uploads used to mean cloning 100k snapshots ten times a
+    /// second for a list that shows fifty.
+    overview: TransferOverview,
     /// Held so the poll stops when the panel goes away.
     poll: Option<Task<()>>,
     expanded: bool,
@@ -31,7 +40,12 @@ impl TransferPanel {
     pub fn new(engine: TransferEngine, _: &mut Window, _: &mut Context<Self>) -> Self {
         Self {
             engine,
-            tasks: Vec::new(),
+            overview: TransferOverview {
+                total: 0,
+                active: 0,
+                failed: 0,
+                recent: Vec::new(),
+            },
             poll: None,
             expanded: true,
         }
@@ -43,7 +57,7 @@ impl TransferPanel {
 
     /// Pick up newly queued work and start polling until everything settles.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.tasks = self.engine.snapshot();
+        self.overview = self.engine.overview(VISIBLE_ROWS);
         cx.notify();
 
         if self.poll.is_some() || !self.engine.is_active() {
@@ -55,7 +69,7 @@ impl TransferPanel {
                 cx.background_executor().timer(POLL).await;
 
                 let still_running = this.update(cx, |this, cx| {
-                    this.tasks = this.engine.snapshot();
+                    this.overview = this.engine.overview(VISIBLE_ROWS);
                     cx.notify();
                     this.engine.is_active()
                 });
@@ -70,28 +84,22 @@ impl TransferPanel {
 
             let _ = this.update(cx, |this, cx| {
                 this.poll = None;
-                this.tasks = this.engine.snapshot();
+                this.overview = this.engine.overview(VISIBLE_ROWS);
                 cx.notify();
             });
         }));
     }
 
     pub fn is_empty(&self) -> bool {
-        self.tasks.is_empty()
+        self.overview.total == 0
     }
 
     fn active_count(&self) -> usize {
-        self.tasks
-            .iter()
-            .filter(|task| !task.state.is_finished())
-            .count()
+        self.overview.active
     }
 
     fn failed_count(&self) -> usize {
-        self.tasks
-            .iter()
-            .filter(|task| matches!(task.state, TaskState::Failed(_)))
-            .count()
+        self.overview.failed
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -122,7 +130,7 @@ impl TransferPanel {
             )
             .child(div().text_sm().child(SharedString::from(format!(
                 "传输 · {} 项",
-                self.tasks.len()
+                self.overview.total
             ))))
             .when(active > 0, |el| {
                 el.child(
@@ -169,7 +177,7 @@ impl TransferPanel {
                     .label("清理已完成")
                     .ghost()
                     .xsmall()
-                    .disabled(self.tasks.len() == active)
+                    .disabled(self.overview.total == active)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         this.engine.clear_finished();
                         this.refresh(cx);
@@ -286,15 +294,15 @@ impl TransferPanel {
 impl Render for TransferPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Nothing queued yet: stay out of the way entirely.
-        if self.tasks.is_empty() {
+        if self.overview.total == 0 {
             return div().into_any_element();
         }
 
+        // Already newest-first and already capped by the engine.
         let rows: Vec<_> = self
-            .tasks
+            .overview
+            .recent
             .iter()
-            .rev()
-            .take(50)
             .map(|task| self.render_task(task, cx).into_any_element())
             .collect();
 

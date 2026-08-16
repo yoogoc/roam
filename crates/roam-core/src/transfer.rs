@@ -217,6 +217,17 @@ struct TaskRecord {
 }
 
 /// A point-in-time view of a task, for rendering.
+/// What the transfer panel needs in order to draw: counts over everything, plus
+/// the handful of rows it actually shows.
+#[derive(Debug, Clone)]
+pub struct TransferOverview {
+    pub total: usize,
+    pub active: usize,
+    pub failed: usize,
+    /// Newest first, capped at the limit that was asked for.
+    pub recent: Vec<TaskSnapshot>,
+}
+
 #[derive(Debug, Clone)]
 pub struct TaskSnapshot {
     pub id: TaskId,
@@ -389,38 +400,77 @@ impl TransferEngine {
             .retain(|record| !record.state.lock().unwrap().is_finished());
     }
 
+    /// Counts plus the newest few tasks — everything the panel draws.
+    ///
+    /// `snapshot()` clones every record and takes three locks per task. Dropping a
+    /// folder of 100k files makes 100k tasks (one per file), and the panel polled
+    /// ten times a second, so that was millions of lock acquisitions per second
+    /// spent on rows that were never drawn: the list shows fifty.
+    ///
+    /// The counts still walk every record, but they only read one lock each and
+    /// clone nothing.
+    pub fn overview(&self, limit: usize) -> TransferOverview {
+        let tasks = self.inner.tasks.lock().unwrap();
+
+        let mut active = 0usize;
+        let mut failed = 0usize;
+        for record in tasks.iter() {
+            let state = record.state.lock().unwrap();
+            if !state.is_finished() {
+                active += 1;
+            }
+            if matches!(*state, TaskState::Failed(_)) {
+                failed += 1;
+            }
+        }
+
+        // Newest first, matching the order the panel draws them in.
+        let recent = tasks.iter().rev().take(limit).map(Self::describe).collect();
+
+        TransferOverview {
+            total: tasks.len(),
+            active,
+            failed,
+            recent,
+        }
+    }
+
     pub fn snapshot(&self) -> Vec<TaskSnapshot> {
         self.inner
             .tasks
             .lock()
             .unwrap()
             .iter()
-            .map(|record| {
-                let done = record.progress.lock().unwrap().done();
-                let state = record.state.lock().unwrap().clone();
-
-                let bytes_per_sec = record
-                    .started
-                    .lock()
-                    .unwrap()
-                    .and_then(|started| {
-                        let secs = started.elapsed().as_secs_f64();
-                        (secs > 0.05).then(|| (done as f64 / secs) as u64)
-                    })
-                    .filter(|_| matches!(state, TaskState::Running));
-
-                TaskSnapshot {
-                    id: record.id,
-                    retryable: matches!(state, TaskState::Failed(_)),
-                    label: record.label.clone(),
-                    operation: record.operation,
-                    state,
-                    done,
-                    total: record.total,
-                    bytes_per_sec,
-                }
-            })
+            .map(Self::describe)
             .collect()
+    }
+
+    /// One task's public shape. Shared by `snapshot` and `overview` so the two can
+    /// never drift.
+    fn describe(record: &Arc<TaskRecord>) -> TaskSnapshot {
+        let done = record.progress.lock().unwrap().done();
+        let state = record.state.lock().unwrap().clone();
+
+        let bytes_per_sec = record
+            .started
+            .lock()
+            .unwrap()
+            .and_then(|started| {
+                let secs = started.elapsed().as_secs_f64();
+                (secs > 0.05).then(|| (done as f64 / secs) as u64)
+            })
+            .filter(|_| matches!(state, TaskState::Running));
+
+        TaskSnapshot {
+            id: record.id,
+            retryable: matches!(state, TaskState::Failed(_)),
+            label: record.label.clone(),
+            operation: record.operation,
+            state,
+            done,
+            total: record.total,
+            bytes_per_sec,
+        }
     }
 
     /// True while any task is queued or running — the UI polls progress only
