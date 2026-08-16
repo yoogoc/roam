@@ -14,6 +14,7 @@ pub mod preview;
 pub mod profile;
 pub mod rt;
 pub mod service;
+pub mod sftp_auth;
 pub mod transfer;
 pub mod tree;
 pub mod vfs;
@@ -22,8 +23,8 @@ pub use cache::{CacheEntry, ListingCache};
 pub use error::{Error, Recovery, Result};
 pub use menu::{EntryAction, MenuItem};
 pub use model::{
-    DirEntry, EntryKind, Generation, ObjectVersion, RemotePath, SessionId, SortKey, matches_filter,
-    sort_indices, view_indices,
+    DirEntry, EntryKind, Generation, ObjectVersion, RemotePath, SessionId, SortKey, ViewOptions,
+    matches_filter, sort_indices, view_indices,
 };
 pub use preview::{ImageKind, PreviewKind};
 pub use profile::{Profile, ProfileId, ProfileStore};

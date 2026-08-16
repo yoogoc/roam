@@ -109,6 +109,15 @@ impl DirEntry {
     pub fn is_dir(&self) -> bool {
         self.kind == EntryKind::Dir
     }
+
+    /// A dotfile, by the only convention the backends share.
+    ///
+    /// There is nothing else to go on: S3 has no hidden flag, and neither do the
+    /// other object stores. A leading dot is what `ls` means by hidden and what a
+    /// user typing `.git` expects to be able to find.
+    pub fn is_hidden(&self) -> bool {
+        self.name.starts_with('.')
+    }
 }
 
 /// One stored version of an object.
@@ -165,7 +174,17 @@ pub enum SortKey {
 ///
 /// Directories always come before files, regardless of key or direction.
 pub fn sort_indices(entries: &[DirEntry], key: SortKey, ascending: bool) -> Vec<u32> {
-    view_indices(entries, key, ascending, "")
+    view_indices(
+        entries,
+        ViewOptions {
+            key,
+            ascending,
+            // Everything: this is the sort-only helper, and hiding dotfiles is the
+            // view's decision, not sorting's.
+            show_hidden: true,
+            ..Default::default()
+        },
+    )
 }
 
 /// Does `name` match the filter box's text?
@@ -183,9 +202,46 @@ pub fn matches_filter(name: &str, filter: &str) -> bool {
 ///
 /// Filtering happens here rather than on the entry list so that clearing the
 /// filter costs nothing — the entries were never touched.
-pub fn view_indices(entries: &[DirEntry], key: SortKey, ascending: bool, filter: &str) -> Vec<u32> {
+/// How a listing is presented: what to sort by, which way, what to filter to, and
+/// whether dotfiles are shown.
+///
+/// A struct rather than four positional arguments, because two of them are `bool`
+/// and sat next to each other — `view_indices(.., true, false)` would compile with
+/// them the wrong way round and quietly hide everything instead of sorting
+/// ascending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewOptions<'a> {
+    pub key: SortKey,
+    pub ascending: bool,
+    pub filter: &'a str,
+    /// Dotfiles are hidden by default, the way a file manager does it.
+    pub show_hidden: bool,
+}
+
+impl Default for ViewOptions<'_> {
+    fn default() -> Self {
+        Self {
+            key: SortKey::Name,
+            ascending: true,
+            filter: "",
+            show_hidden: false,
+        }
+    }
+}
+
+pub fn view_indices(entries: &[DirEntry], options: ViewOptions<'_>) -> Vec<u32> {
+    let ViewOptions {
+        key,
+        ascending,
+        filter,
+        show_hidden,
+    } = options;
+
     let mut ix: Vec<u32> = (0..entries.len() as u32)
-        .filter(|&i| matches_filter(&entries[i as usize].name, filter))
+        .filter(|&i| {
+            let entry = &entries[i as usize];
+            (show_hidden || !entry.is_hidden()) && matches_filter(&entry.name, filter)
+        })
         .collect();
 
     ix.sort_by(|&a, &b| {
@@ -222,6 +278,95 @@ fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hidden_fixture() -> Vec<DirEntry> {
+        vec![
+            entry("visible.txt", EntryKind::File, Some(1)),
+            entry(".hidden.txt", EntryKind::File, Some(2)),
+            entry(".git", EntryKind::Dir, None),
+            entry("docs", EntryKind::Dir, None),
+        ]
+    }
+
+    fn names(entries: &[DirEntry], view: &[u32]) -> Vec<String> {
+        view.iter()
+            .map(|&i| entries[i as usize].name.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn dotfiles_are_hidden_by_default() {
+        let entries = hidden_fixture();
+        let view = view_indices(&entries, ViewOptions::default());
+
+        // Directories still first, and neither the dot-file nor the dot-directory
+        // appears.
+        assert_eq!(names(&entries, &view), vec!["docs", "visible.txt"]);
+    }
+
+    #[test]
+    fn showing_hidden_brings_back_both_files_and_directories() {
+        let entries = hidden_fixture();
+        let view = view_indices(
+            &entries,
+            ViewOptions {
+                show_hidden: true,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            names(&entries, &view),
+            vec![".git", "docs", ".hidden.txt", "visible.txt"]
+        );
+    }
+
+    #[test]
+    fn the_text_filter_still_applies_to_hidden_entries() {
+        // Typing `.hidden` while hidden entries are shown must find it; while they
+        // are not, it must not — the toggle wins, otherwise "hidden" would mean
+        // "hidden unless you guess the name".
+        let entries = hidden_fixture();
+
+        let shown = view_indices(
+            &entries,
+            ViewOptions {
+                filter: "hidden",
+                show_hidden: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(names(&entries, &shown), vec![".hidden.txt"]);
+
+        let not_shown = view_indices(
+            &entries,
+            ViewOptions {
+                filter: "hidden",
+                ..Default::default()
+            },
+        );
+        assert!(names(&entries, &not_shown).is_empty());
+    }
+
+    #[test]
+    fn is_hidden_is_about_the_name_not_the_path() {
+        // A file inside a dot-directory is not itself hidden; listing that
+        // directory should show its contents.
+        let mut nested = entry("readme.md", EntryKind::File, Some(1));
+        nested.path = ".git/readme.md".into();
+        assert!(!nested.is_hidden());
+
+        assert!(entry(".git", EntryKind::Dir, None).is_hidden());
+    }
+
+    #[test]
+    fn sort_only_helper_keeps_everything() {
+        // `sort_indices` is used where the caller has already decided what to
+        // include; it must not quietly drop dotfiles.
+        let entries = hidden_fixture();
+        let view = sort_indices(&entries, SortKey::Name, true);
+        assert_eq!(view.len(), entries.len());
+    }
 
     fn entry(name: &str, kind: EntryKind, size: Option<u64>) -> DirEntry {
         DirEntry {
@@ -381,7 +526,15 @@ mod tests {
             entry("apple.txt", EntryKind::File, Some(1)),
         ];
 
-        let view = view_indices(&entries, SortKey::Name, true, "rep");
+        let view = view_indices(
+            &entries,
+            ViewOptions {
+                key: SortKey::Name,
+                ascending: true,
+                filter: "rep",
+                show_hidden: true,
+            },
+        );
         let names: Vec<&str> = view.iter().map(|&i| &*entries[i as usize].name).collect();
 
         // Directories still come first inside the filtered set.
@@ -395,14 +548,49 @@ mod tests {
             entry("b.txt", EntryKind::File, Some(1)),
         ];
 
-        assert_eq!(view_indices(&entries, SortKey::Name, true, "a").len(), 1);
-        assert_eq!(view_indices(&entries, SortKey::Name, true, "").len(), 2);
+        assert_eq!(
+            view_indices(
+                &entries,
+                ViewOptions {
+                    key: SortKey::Name,
+                    ascending: true,
+                    filter: "a",
+                    show_hidden: true,
+                },
+            )
+            .len(),
+            1
+        );
+        assert_eq!(
+            view_indices(
+                &entries,
+                ViewOptions {
+                    key: SortKey::Name,
+                    ascending: true,
+                    show_hidden: true,
+                    ..Default::default()
+                },
+            )
+            .len(),
+            2
+        );
     }
 
     #[test]
     fn a_filter_matching_nothing_yields_an_empty_view() {
         let entries = vec![entry("a.txt", EntryKind::File, Some(1))];
-        assert!(view_indices(&entries, SortKey::Name, true, "zzz").is_empty());
+        assert!(
+            view_indices(
+                &entries,
+                ViewOptions {
+                    key: SortKey::Name,
+                    ascending: true,
+                    filter: "zzz",
+                    show_hidden: true,
+                },
+            )
+            .is_empty()
+        );
     }
 
     #[test]

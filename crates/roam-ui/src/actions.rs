@@ -34,6 +34,8 @@ actions!(
         DeleteSelected,
         /// Toggle the preview panel.
         TogglePreview,
+        /// Show or hide dotfiles.
+        ToggleHidden,
         DownloadSelected,
         /// Open another tab on the same session and directory.
         NewTab,
@@ -58,6 +60,8 @@ pub fn init(cx: &mut App) {
         // same confirmation the menu does — no shortcut deletes without asking.
         KeyBinding::new("cmd-backspace", DeleteSelected, Some(BROWSER_CONTEXT)),
         KeyBinding::new("space", TogglePreview, Some(BROWSER_CONTEXT)),
+        // What Finder uses, so it is the one people try first.
+        KeyBinding::new("cmd-shift-.", ToggleHidden, Some(BROWSER_CONTEXT)),
         KeyBinding::new("cmd-d", DownloadSelected, Some(BROWSER_CONTEXT)),
         KeyBinding::new("cmd-t", NewTab, Some(WORKSPACE_CONTEXT)),
         KeyBinding::new("cmd-w", CloseTab, Some(WORKSPACE_CONTEXT)),

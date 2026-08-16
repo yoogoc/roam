@@ -11,6 +11,7 @@ use tokio::task::JoinHandle;
 
 use crate::menu::{self, MenuItem};
 use crate::profile::Profile;
+use crate::sftp_auth;
 use crate::transfer::{CHUNK, TaskProgress, WRITER_CONCURRENCY};
 use crate::{DirEntry, Error, ObjectVersion, Result, Rt, path};
 
@@ -120,9 +121,30 @@ impl Vfs {
         Ok(Self::from_operator(rt, op, root))
     }
 
-    /// Build a session from a saved profile, pulling credentials from `store`.
+    /// Build a session from a saved profile.
     pub fn from_profile(rt: Rt, profile: &Profile) -> Result<Self> {
-        let options = profile.connect_options()?;
+        let mut options = profile.connect_options()?;
+
+        // sftp passwords do not go to OpenDAL — it has no option for one, and
+        // handing it a key it does not know is not something to rely on. They go
+        // to `ssh` instead, through the helper described in `sftp_auth`.
+        if profile.scheme() == "sftp"
+            && let Some(ix) = options.iter().position(|(key, _)| key == "password")
+        {
+            let (_, password) = options.remove(ix);
+            let user = options
+                .iter()
+                .find(|(key, _)| key == "user")
+                .map(|(_, value)| value.as_str())
+                .unwrap_or("");
+            let endpoint = options
+                .iter()
+                .find(|(key, _)| key == "endpoint")
+                .map(|(_, value)| value.as_str())
+                .unwrap_or("");
+
+            sftp_auth::install(user, endpoint, &password)?;
+        }
 
         // `from_uri` takes a single argument; options ride along as a tuple.
         let op = Operator::from_uri((profile.uri.as_str(), options))?

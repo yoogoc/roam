@@ -26,7 +26,7 @@ use roam_core::{
 
 use crate::actions::{
     BROWSER_CONTEXT, DeleteSelected, DownloadSelected, FocusFilter, GoBack, GoForward, GoUp,
-    NewFolder, OpenSelected, Reload, TogglePreview,
+    NewFolder, OpenSelected, Reload, ToggleHidden, TogglePreview,
 };
 use crate::delegate::EntriesDelegate;
 use crate::name_dialog::NameDialog;
@@ -348,6 +348,30 @@ impl Browser {
         if let Some(entry) = self.selected_entry(cx) {
             self.download(entry, window, cx);
         }
+    }
+
+    fn action_toggle_hidden(&mut self, _: &ToggleHidden, _: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_hidden(cx);
+    }
+
+    /// Show or hide dotfiles.
+    ///
+    /// Rebuilds the index view rather than re-listing: the entries are already
+    /// here, and re-fetching a large directory to change a display setting would
+    /// be the wrong trade entirely.
+    fn toggle_hidden(&mut self, cx: &mut Context<Self>) {
+        self.table.update(cx, |state, cx| {
+            let delegate = state.delegate_mut();
+            let show = !delegate.show_hidden();
+            delegate.set_show_hidden(show);
+            state.refresh(cx);
+        });
+        cx.notify();
+    }
+
+    /// Whether dotfiles are currently listed, for the toolbar button's state.
+    fn show_hidden(&self, cx: &gpui::App) -> bool {
+        self.table.read(cx).delegate().show_hidden()
     }
 
     fn action_toggle_preview(&mut self, _: &TogglePreview, _: &mut Window, cx: &mut Context<Self>) {
@@ -1005,6 +1029,7 @@ impl Browser {
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let can_up = path::parent(&self.cwd).is_some();
         let can_create_dir = self.vfs.capability().create_dir;
+        let show_hidden = self.show_hidden(cx);
 
         h_flex()
             .gap_1()
@@ -1055,6 +1080,23 @@ impl Browser {
                     .w(px(200.))
                     .flex_none()
                     .child(Input::new(&self.filter).xsmall()),
+            )
+            .child(
+                Button::new("toggle-hidden")
+                    .icon(if show_hidden {
+                        IconName::Eye
+                    } else {
+                        IconName::EyeOff
+                    })
+                    .ghost()
+                    .small()
+                    .tooltip(if show_hidden {
+                        "隐藏点文件（⌘⇧.）"
+                    } else {
+                        "显示点文件（⌘⇧.）"
+                    })
+                    .selected(show_hidden)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_hidden(cx))),
             )
             .child(
                 Button::new("toggle-preview")
@@ -1215,6 +1257,7 @@ impl Render for Browser {
             .on_action(cx.listener(Self::action_delete))
             .on_action(cx.listener(Self::action_download))
             .on_action(cx.listener(Self::action_toggle_preview))
+            .on_action(cx.listener(Self::action_toggle_hidden))
             .child(self.render_toolbar(cx))
             .when_some(self.error.clone(), |el, err| {
                 el.child(self.render_error(&err, cx))

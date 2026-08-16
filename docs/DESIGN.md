@@ -884,6 +884,43 @@ not implemented: Test Windows are not backed by a real platform window
 
 **回归防护**:缓存淘汰有 4 个单测（含「当前目录不被淘汰」和「少量浏览不触发淘汰」）；树缓存有 3 个 gpui 测试。后者是**不开窗口**写的，因为 `Root` 在 macOS 测试平台下会 panic（见上文），而 `DirTreeView` 只需要 `App` —— 顺带发现 zed 新的测试调度器还会把我们 tokio 线程上的活动判为「非确定性」，所以这些测试也刻意不触发任何列举。
 
+### SFTP 密码认证:为什么只有一条路可走
+
+用户要求 sftp 支持账号密码。**OpenDAL 的 sftp service 没有 password 选项** —— 它的配置只有 `endpoint`、`root`、`user`、`key`、`known_hosts_strategy`、`enable_copy`;底下建的是 `openssh::SessionBuilder`,而它的认证设置只有 `keyfile`、`user`、`ssh_auth_sock`。原因是它并不自己说 SSH 协议:它 fork 系统 `ssh`,而 `ssh` 按设计从不接受命令行密码。
+
+`ssh` 接受的是**助手程序**:设了 `SSH_ASKPASS` 且 `SSH_ASKPASS_REQUIRE=force` 时,它向该程序索取密码而不是读终端(OpenSSH 8.4+ 无需 `DISPLAY`;实测 macOS 自带的 10.3 可用)。OpenDAL fork 的 `ssh` 是我们的子进程,继承我们的环境 —— 这是不改 OpenDAL 就能走的门。
+
+**但只有这一半不够。** `openssh` 的命令行里写死了 `-o BatchMode=yes`,而 `BatchMode` 恰恰就是关掉密码提示(含 askpass)的那个开关。实测:同一个连接不带它能成功,带上就得到 `Permission denied (publickey,password,keyboard-interactive)`。而且**从外面覆盖不掉** —— `ssh` 对同一选项取**首个**值,它已经在命令行上了。
+
+所以第二半:`openssh` 是通过 **PATH** 找 `ssh` 的,我们在自己进程的 PATH 前面放一个同名 shim。它只摘掉那一个选项,然后 `exec` 真正的 `ssh`,其余一字不动 —— argv 是**逐个轮转**而不是拼字符串重建的,因为控制 socket 路径带空格。shim 只在 profile 真的配了密码时才装,所以纯密钥连接保留 `BatchMode` 与它的快速失败。
+
+**密码怎么找到对应的连接。** `SSH_ASKPASS` 是进程全局的,而 app 可以同时开多个 sftp 会话。`ssh` 把提示词作为唯一参数传给助手(`pwuser@127.0.0.1's password: `),所以助手能判断是**谁**在问,按 `user@host` 去环境变量里取 —— 密码因此不落任何文件,包括助手脚本自己。端口不出现在提示里,所以推导键名时必须剥掉端口(实测在 12222 上确认)。
+
+写这段时踩到的:
+
+- 助手里的 shell 变换和 Rust 里的 `env_key` 必须推出同一个名字。不一致的表现是「密码为空」→ 看起来像凭据错误而不是 bug,所以有一条测试**真的执行那个脚本**来比对。
+- 我自己的测试先撞上了这个设计的边界:两个测试用同一个 `user@host`,而环境是全局的,先跑的「错密码」那条**覆盖**了后跑的正确密码。改成用不同用户 —— 这也说明同一 `user@host` 配两个不同密码是这套机制的真实限制。
+- endpoint 必须写成 `ssh://host:port`。`host:port` 会被 openssh 当作**主机名**整体传给 ssh,失败信息是「连不上」,与认证无关。
+- 测试容器要用 `user:pass:[e]:uid:gid:dirs`,把 `upload` 写到 gid 位会让容器直接退出(`Invalid GID`)。
+- 容器重建后主机密钥变了,`StrictHostKeyChecking=no` **不会**放过「密钥变更」(它只自动接受新主机),所以 `up sftp-pw` 会先清掉那条 known_hosts 记录。
+
+**代价**:密码在 app 进程的环境里存活。其他用户读不到,同一用户能读到 —— 与 `profiles.toml` 已有的暴露面相同(§5),不新增风险类别,但值得知道而不是假设。
+
+验证:`scripts/test-backends.sh up sftp-pw` 起一台密码认证的 atmoz/sftp,两条集成测试跑真上传+列举+读回,以及一条「错密码被拒」。
+
+### 显示/隐藏点文件
+
+过滤放在索引视图里,和排序、文本过滤复合,不克隆条目也不重新列举 —— 条目已经在内存里,为一个显示设置去重新拉一遍大目录是完全错的取舍。
+
+`view_indices` 的参数从四个位置参数改成了 `ViewOptions`,因为其中两个是 `bool` 且相邻:`view_indices(.., true, false)` 写反了照样编译,结果是「本该升序排列,却把所有东西藏了起来」。
+
+- 判定就是**名字以点开头**。别无依据:S3 和其他对象存储都没有 hidden 标志,而点前缀是 `ls` 所指的隐藏,也是用户敲 `.git` 时期待能找到的东西。
+- 默认隐藏,`⌘⇧.`(Finder 的键)切换,工具栏按钮用 `Eye`/`EyeOff` 并反映当前状态。
+- **`extend` 有独立的过滤路径**(流式批次),所以它也得判 —— 否则大目录加载期间点文件会从那条路漏进来。这条有专门的测试。
+- 设置在新列举后保留,否则每次进目录都像是自己把开关关了。
+
+这四条行为的测试都是**无窗口**的(delegate 是普通结构体),所以在上游 `Root` 阻塞的情况下照样能跑。
+
 ### 两个测试抓出来的真问题
 
 1. **`connect_local` 从 `browser.vfs()` 取本机 session** —— 但切到远端后那已经是远端的 Vfs，"回到本机" 实际上在重新列举远端。Workspace 必须自己保留本机 Vfs。

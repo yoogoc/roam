@@ -17,7 +17,7 @@
 
 use std::time::{Duration, Instant};
 
-use roam_core::{DirEntry, EntryKind, Rt, SortKey, Vfs, view_indices};
+use roam_core::{DirEntry, EntryKind, Rt, SortKey, Vfs, ViewOptions, view_indices};
 
 const ENTRIES: usize = 100_000;
 
@@ -57,10 +57,26 @@ fn sorting_a_hundred_thousand_entries_is_an_index_sort() {
     eprintln!("sorting {ENTRIES} entries");
 
     let (by_name, name_time) = timed("by name", || {
-        view_indices(&entries, SortKey::Name, true, "")
+        view_indices(
+            &entries,
+            ViewOptions {
+                key: SortKey::Name,
+                ascending: true,
+                show_hidden: true,
+                ..Default::default()
+            },
+        )
     });
     let (by_size, size_time) = timed("by size", || {
-        view_indices(&entries, SortKey::Size, false, "")
+        view_indices(
+            &entries,
+            ViewOptions {
+                key: SortKey::Size,
+                ascending: false,
+                show_hidden: true,
+                ..Default::default()
+            },
+        )
     });
 
     assert_eq!(by_name.len(), ENTRIES);
@@ -87,7 +103,15 @@ fn filtering_a_hundred_thousand_entries_does_not_touch_the_entries() {
     eprintln!("filtering {ENTRIES} entries");
 
     let (matched, filter_time) = timed("filter \"file-0001\"", || {
-        view_indices(&entries, SortKey::Name, true, "file-0001")
+        view_indices(
+            &entries,
+            ViewOptions {
+                key: SortKey::Name,
+                ascending: true,
+                filter: "file-0001",
+                show_hidden: true,
+            },
+        )
     });
 
     // Every name is unique, so this is a small, predictable subset.
@@ -101,7 +125,15 @@ fn filtering_a_hundred_thousand_entries_does_not_touch_the_entries() {
     // The whole claim: clearing the filter is free because the entry list was
     // never modified in the first place.
     let (all, clear_time) = timed("clear the filter", || {
-        view_indices(&entries, SortKey::Name, true, "")
+        view_indices(
+            &entries,
+            ViewOptions {
+                key: SortKey::Name,
+                ascending: true,
+                show_hidden: true,
+                ..Default::default()
+            },
+        )
     });
     assert_eq!(all.len(), ENTRIES);
     assert!(clear_time < Duration::from_secs(5));
@@ -110,7 +142,15 @@ fn filtering_a_hundred_thousand_entries_does_not_touch_the_entries() {
 #[test]
 fn an_index_view_costs_four_bytes_per_row() {
     let entries = synthetic(ENTRIES);
-    let view = view_indices(&entries, SortKey::Name, true, "");
+    let view = view_indices(
+        &entries,
+        ViewOptions {
+            key: SortKey::Name,
+            ascending: true,
+            show_hidden: true,
+            ..Default::default()
+        },
+    );
 
     // The design's reason for using `Vec<u32>`: the view is a rounding error next
     // to the entries themselves, so re-deriving it per sort click is cheap.
@@ -137,7 +177,15 @@ fn repeated_sorting_does_not_accumulate_cost() {
     for i in 0..10 {
         let ascending = i % 2 == 0;
         let start = Instant::now();
-        let view = view_indices(&entries, SortKey::Name, ascending, "");
+        let view = view_indices(
+            &entries,
+            ViewOptions {
+                key: SortKey::Name,
+                ascending,
+                show_hidden: true,
+                ..Default::default()
+            },
+        );
         worst = worst.max(start.elapsed());
         assert_eq!(view.len(), ENTRIES);
     }
@@ -233,8 +281,28 @@ fn sorting_scales_linearly_enough_to_rule_out_quadratic_cost() {
     let small = synthetic(10_000);
     let large = synthetic(100_000);
 
-    let (_, small_time) = timed("10k", || view_indices(&small, SortKey::Name, true, ""));
-    let (_, large_time) = timed("100k", || view_indices(&large, SortKey::Name, true, ""));
+    let (_, small_time) = timed("10k", || {
+        view_indices(
+            &small,
+            ViewOptions {
+                key: SortKey::Name,
+                ascending: true,
+                show_hidden: true,
+                ..Default::default()
+            },
+        )
+    });
+    let (_, large_time) = timed("100k", || {
+        view_indices(
+            &large,
+            ViewOptions {
+                key: SortKey::Name,
+                ascending: true,
+                show_hidden: true,
+                ..Default::default()
+            },
+        )
+    });
 
     let ratio = large_time.as_secs_f64() / small_time.as_secs_f64().max(1e-9);
     eprintln!("  100k/10k ratio: {ratio:.1}x (n log n predicts ~12x)");

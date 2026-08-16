@@ -4,7 +4,7 @@ use gpui::{App, Context, IntoElement, ParentElement, Styled, Window, div, px};
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::table::{Column, ColumnSort, TableDelegate, TableState};
 use gpui_component::{ActiveTheme, Icon, IconName, h_flex};
-use roam_core::{DirEntry, EntryAction, EntryKind, SortKey, Vfs, fmt, view_indices};
+use roam_core::{DirEntry, EntryAction, EntryKind, SortKey, Vfs, ViewOptions, fmt, view_indices};
 
 /// Invoked when a context-menu item is chosen. The `Browser` installs this so
 /// all behaviour stays in the view that owns the session, while the delegate
@@ -28,6 +28,8 @@ pub struct EntriesDelegate {
     ascending: bool,
     /// Filter box text. Applies to the index view only.
     filter: String,
+    /// Whether dotfiles are listed. Off by default, like a file manager.
+    show_hidden: bool,
     loading: bool,
     /// The session the rows belong to; supplies the capability set the context
     /// menu is derived from.
@@ -53,6 +55,7 @@ impl EntriesDelegate {
             sort_key: SortKey::Name,
             ascending: true,
             filter: String::new(),
+            show_hidden: false,
             loading: false,
             vfs: None,
             on_action: None,
@@ -99,13 +102,19 @@ impl EntriesDelegate {
         let start = self.entries.len() as u32;
         self.entries.extend(batch);
 
-        // Newly streamed rows still have to pass the active filter, or typing a
-        // filter while a large directory loads would leak non-matching rows in.
-        self.view.extend(
-            (start..self.entries.len() as u32).filter(|&i| {
-                roam_core::matches_filter(&self.entries[i as usize].name, &self.filter)
-            }),
-        );
+        // Newly streamed rows still have to pass the active filter *and* the
+        // hidden-files setting, or either one would leak rows in while a large
+        // directory loads.
+        // Collected first so the immutable borrow of `entries` ends before `view`
+        // is borrowed mutably. Bounded by the batch, not the directory.
+        let admitted: Vec<u32> = (start..self.entries.len() as u32)
+            .filter(|&i| {
+                let entry = &self.entries[i as usize];
+                (self.show_hidden || !entry.is_hidden())
+                    && roam_core::matches_filter(&entry.name, &self.filter)
+            })
+            .collect();
+        self.view.extend(admitted);
     }
 
     /// Set the filter and rebuild the index view.
@@ -129,7 +138,26 @@ impl EntriesDelegate {
     }
 
     fn resort(&mut self) {
-        self.view = view_indices(&self.entries, self.sort_key, self.ascending, &self.filter);
+        self.view = view_indices(&self.entries, self.options());
+    }
+
+    fn options(&self) -> ViewOptions<'_> {
+        ViewOptions {
+            key: self.sort_key,
+            ascending: self.ascending,
+            filter: &self.filter,
+            show_hidden: self.show_hidden,
+        }
+    }
+
+    /// Are dotfiles listed?
+    pub fn show_hidden(&self) -> bool {
+        self.show_hidden
+    }
+
+    pub fn set_show_hidden(&mut self, show: bool) {
+        self.show_hidden = show;
+        self.resort();
     }
 }
 
@@ -420,5 +448,101 @@ mod scale_tests {
             let entry = delegate.entry(ix).unwrap();
             assert!(entry.name.contains("row-00001"), "leaked {}", entry.name);
         }
+    }
+}
+
+#[cfg(test)]
+mod hidden_tests {
+    //! Runs without a window on purpose: the delegate is a plain struct, and the
+    //! browser harness that would otherwise cover this cannot start under gpui's
+    //! macOS test platform (see docs/DESIGN.md). This is the layer where the
+    //! behaviour lives anyway.
+
+    use super::*;
+
+    fn entry(name: &str, kind: EntryKind) -> DirEntry {
+        DirEntry {
+            name: name.into(),
+            path: name.into(),
+            kind,
+            size: Some(1),
+            modified: None,
+            etag: None,
+            meta_complete: true,
+        }
+    }
+
+    fn listing() -> Vec<DirEntry> {
+        vec![
+            entry("visible.txt", EntryKind::File),
+            entry(".hidden.txt", EntryKind::File),
+            entry(".git", EntryKind::Dir),
+            entry("docs", EntryKind::Dir),
+        ]
+    }
+
+    fn names(delegate: &EntriesDelegate) -> Vec<String> {
+        (0..delegate.shown())
+            .filter_map(|ix| delegate.entry(ix))
+            .map(|entry| entry.name.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn dotfiles_are_hidden_until_asked_for() {
+        let mut delegate = EntriesDelegate::new();
+        delegate.reset(listing(), false);
+
+        assert!(!delegate.show_hidden());
+        assert_eq!(names(&delegate), vec!["docs", "visible.txt"]);
+        // The count of what exists is unchanged; only what is drawn differs.
+        assert_eq!(delegate.total(), 4);
+        assert_eq!(delegate.shown(), 2);
+
+        delegate.set_show_hidden(true);
+        assert_eq!(
+            names(&delegate),
+            vec![".git", "docs", ".hidden.txt", "visible.txt"]
+        );
+    }
+
+    #[test]
+    fn the_setting_survives_a_new_listing() {
+        // Navigating into another directory must not silently re-hide them —
+        // otherwise the toggle would appear to undo itself on every click into a
+        // folder.
+        let mut delegate = EntriesDelegate::new();
+        delegate.set_show_hidden(true);
+        delegate.reset(listing(), false);
+
+        assert!(delegate.show_hidden());
+        assert_eq!(delegate.shown(), 4);
+    }
+
+    #[test]
+    fn streamed_rows_respect_the_setting() {
+        // `extend` has its own filtering path, separate from `resort`. A batch
+        // arriving while hidden files are off used to be the way they leaked in.
+        let mut delegate = EntriesDelegate::new();
+        delegate.reset(Vec::new(), true);
+        delegate.extend(listing());
+
+        assert_eq!(delegate.shown(), 2, "streamed dotfiles stayed hidden");
+
+        delegate.set_show_hidden(true);
+        delegate.extend(vec![entry(".env", EntryKind::File)]);
+        assert_eq!(delegate.shown(), 5, "and are admitted once shown");
+    }
+
+    #[test]
+    fn the_filter_and_the_setting_compose() {
+        let mut delegate = EntriesDelegate::new();
+        delegate.reset(listing(), false);
+
+        delegate.set_filter("hidden");
+        assert_eq!(delegate.shown(), 0, "hidden wins over a matching filter");
+
+        delegate.set_show_hidden(true);
+        assert_eq!(names(&delegate), vec![".hidden.txt"]);
     }
 }

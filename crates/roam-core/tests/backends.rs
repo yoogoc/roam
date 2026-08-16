@@ -505,7 +505,12 @@ async fn webdav_capabilities_are_read_from_the_server() {
 //   profile stores a *path* here rather than a secret.
 
 fn sftp(prefix: &str) -> Option<Vfs> {
-    let key = std::env::var("ROAM_SFTP_KEY").ok()?;
+    // The file, not just the variable: `up` exports every backend's environment
+    // even when only one server was started, so checking the variable alone turns
+    // "not configured" into a failure instead of a skip.
+    let key = std::env::var("ROAM_SFTP_KEY")
+        .ok()
+        .filter(|path| std::path::Path::new(path).is_file())?;
     session(
         "ROAM_SFTP_ENDPOINT",
         "sftp",
@@ -638,4 +643,81 @@ async fn sftp_capabilities_are_read_from_the_server() {
     );
     assert!(cap.read && cap.write && cap.list);
     assert!(!cap.presign, "sftp has no notion of a signed URL");
+}
+
+// ── sftp with a password ──────────────────────────────────────────────────
+//
+// OpenDAL's sftp service has no password option, so this exercises the one path
+// that works: the `SSH_ASKPASS` helper in `roam_core::sftp_auth`. Without a real
+// server the mechanism cannot be checked at all — a unit test can only confirm
+// that two string transforms agree.
+
+fn sftp_password(prefix: &str) -> Option<Vfs> {
+    let endpoint = std::env::var("ROAM_SFTP_PW_ENDPOINT").ok()?;
+    let user = env("ROAM_SFTP_PW_USER", "pwuser");
+    let password = env("ROAM_SFTP_PW_PASSWORD", "pwsecret");
+
+    let mut profile = Profile::new("sftp-pw", "sftp-pw", format!("sftp:///upload/{prefix}"));
+    profile.options.insert("endpoint".into(), endpoint);
+    profile.options.insert("user".into(), user);
+    profile.options.insert("password".into(), password);
+    profile
+        .options
+        .insert("known_hosts_strategy".into(), "accept".into());
+
+    Some(Vfs::from_profile(Rt::from_current().unwrap(), &profile).unwrap())
+}
+
+#[tokio::test]
+async fn sftp_authenticates_with_a_password() {
+    let Some(vfs) = sftp_password(&format!("pw-basic-{}/", std::process::id())) else {
+        eprintln!("skipping: ROAM_SFTP_PW_ENDPOINT is not set");
+        return;
+    };
+
+    let source = tempfile::tempdir().unwrap();
+    let file = source.path().join("hello.txt");
+    std::fs::write(&file, b"authenticated with a password").unwrap();
+
+    vfs.upload_from(file, "hello.txt", Arc::new(TaskProgress::new()))
+        .await
+        .unwrap();
+
+    let entries = vfs.list_all("").await.unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(&*entries[0].name, "hello.txt");
+
+    let body = vfs.read_prefix("hello.txt", 1024).await.unwrap();
+    assert_eq!(body, b"authenticated with a password");
+}
+
+#[tokio::test]
+async fn a_wrong_sftp_password_is_refused() {
+    if std::env::var("ROAM_SFTP_PW_ENDPOINT").is_err() {
+        eprintln!("skipping: ROAM_SFTP_PW_ENDPOINT is not set");
+        return;
+    }
+
+    // A *different* user on purpose. Passwords are keyed by `user@host`, and the
+    // environment they live in is process-global, so reusing `pwuser` here would
+    // overwrite the good password and make the other test fail instead — which is
+    // exactly what happened the first time this was written.
+    let mut profile = Profile::new("sftp-bad", "sftp-bad", "sftp:///upload/");
+    profile.options.insert(
+        "endpoint".into(),
+        std::env::var("ROAM_SFTP_PW_ENDPOINT").unwrap(),
+    );
+    profile.options.insert("user".into(), "nosuchuser".into());
+    profile
+        .options
+        .insert("password".into(), "definitely-wrong".into());
+    profile
+        .options
+        .insert("known_hosts_strategy".into(), "accept".into());
+
+    let vfs = Vfs::from_profile(Rt::from_current().unwrap(), &profile).unwrap();
+    let err = vfs.list_all("").await.unwrap_err();
+
+    // What matters is that it fails rather than connecting anonymously.
+    println!("wrong password gave: {}", err.user_message());
 }
