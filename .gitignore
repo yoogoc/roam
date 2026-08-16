@@ -1,0 +1,8 @@
+/target
+
+# Interrupted downloads (see Vfs::download_to). They are resumable state, not
+# something to commit if someone downloads into the working tree.
+*.roampart
+*.roampart.etag
+
+.DS_Store

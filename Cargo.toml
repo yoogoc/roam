@@ -1,0 +1,61 @@
+[workspace]
+resolver = "3"
+members = ["crates/roam-core", "crates/roam-ui", "crates/roam"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+roam-core = { path = "crates/roam-core" }
+roam-ui = { path = "crates/roam-ui" }
+
+# `services-sftp` shells out to the system `ssh`/`sftp` binaries at runtime via
+# the `openssh` crate — it is not a pure-Rust client. See §14 for what that costs.
+opendal = { version = "0.58.1", default-features = false, features = [
+    "auto-register-services",
+    "executors-tokio",
+    "http-transport-reqwest",
+    "services-fs",
+    "services-s3",
+    "services-gcs",
+    "services-azblob",
+    "services-webdav",
+    "services-sftp",
+    "layers-retry",
+    "layers-timeout",
+    "layers-concurrent-limit",
+] }
+gpui = "0.2.2"
+gpui-component = "0.5.1"
+# Embeds the icon SVGs that gpui-component names but does not ship.
+rust-embed = "8"
+
+# "time" + "net" are what Runtime::enable_all() actually needs; the IO driver has
+# to be live before M2 puts reqwest-backed services on this runtime.
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "sync",
+    "macros",
+    "time",
+    "net",
+    # The transfer engine streams to and from local files.
+    "fs",
+    "io-util",
+] }
+bytes = "1"
+futures = "0.3"
+anyhow = "1"
+thiserror = "2"
+# opendal 0.58 exposes timestamps as jiff::Timestamp, not chrono.
+jiff = "0.2.28"
+dashmap = "6"
+serde = { version = "1", features = ["derive"] }
+toml = "1.1"
+# keyring 4's default "v1" feature keeps the v1 API and pulls the platform-native
+# store (Keychain on macOS). Secrets never touch profiles.toml.
+keyring = "4.1"
+directories = "6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

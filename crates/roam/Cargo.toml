@@ -1,0 +1,20 @@
+[package]
+name = "roam"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Roam — a cross-backend file browser"
+
+[[bin]]
+name = "roam"
+path = "src/main.rs"
+
+[dependencies]
+roam-core.workspace = true
+roam-ui.workspace = true
+gpui.workspace = true
+gpui-component.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

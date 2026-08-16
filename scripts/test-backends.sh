@@ -1,0 +1,386 @@
+#!/usr/bin/env bash
+#
+# Start (or stop) the local servers the integration tests need.
+#
+# The rest of the suite runs against OpenDAL's local `fs` service, which never
+# touches the network. These servers exist so the real protocol paths — request
+# signing, XML/JSON parsing, listing pagination, multipart and one-shot uploads,
+# presigning, PROPFIND — actually run.
+#
+#   scripts/test-backends.sh up [backend]     start and print the env to export
+#                                             (BARE_ENV=1 drops the `export `
+#                                              prefix, for CI's $GITHUB_ENV)
+#   scripts/test-backends.sh test [backend]   start, then run that backend's tests
+#   scripts/test-backends.sh down             stop and remove everything
+#
+# backend: s3 | azblob | gcs | webdav | sftp | all   (default: all)
+#
+set -euo pipefail
+
+S3_PORT=19000
+AZ_PORT=10000
+GCS_PORT=14443
+DAV_PORT=18080
+SFTP_PORT=12222
+
+BUCKET=roam-test
+KEY=roamtest
+SECRET=roamtest-secret
+
+# Azurite's well-known development credentials.
+AZ_ACCOUNT=devstoreaccount1
+AZ_KEY='Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=='
+
+# Deliberately inside the repo rather than under $TMPDIR. On macOS, TMPDIR is
+# /var/folders/..., which Docker Desktop does not share by default — the bind
+# mount then silently resolves to nothing and MinIO reports
+# "Unable to use the drive /data: drive not found". `target/` is already
+# gitignored and is under a path Docker can see.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DATA="${ROAM_TEST_DATA:-$REPO_ROOT/target/test-backends}"
+
+require_docker() {
+    if ! docker info >/dev/null 2>&1; then
+        echo "docker is not running" >&2
+        exit 1
+    fi
+}
+
+wait_for() {
+    local what=$1 url=$2 expect=${3:-200}
+    # Progress goes to stderr so that `up` can be piped somewhere that expects
+    # only variables (CI writes it into $GITHUB_ENV).
+    printf 'waiting for %s' "$what" >&2
+    for _ in $(seq 1 60); do
+        local code
+        code=$(curl -s -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || echo 000)
+        if [ "$code" = "$expect" ] || { [ "$expect" = "any" ] && [ "$code" != "000" ]; }; then
+            echo " ready" >&2
+            return 0
+        fi
+        printf . >&2
+        sleep 0.5
+    done
+    echo " timed out" >&2
+    return 1
+}
+
+start() {
+    local name=$1
+    shift
+
+    # Reuse only a *running* container. A stopped one is recreated instead of
+    # restarted: `down` deletes the data directory, so an old container's bind
+    # mount would point at a path that no longer holds what it expects — MinIO
+    # answers that with "Unable to use the drive /data".
+    if [ -n "$(docker ps -q -f name="^${name}$")" ]; then
+        return 0
+    fi
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    docker run -d --name "$name" "$@" >/dev/null
+}
+
+up_s3() {
+    # The bucket is created through the S3 API below, not by making a directory
+    # under the data dir. MinIO does turn a top-level directory into a bucket,
+    # but that only works when we and the daemon see the same filesystem — a
+    # runner that executes steps inside a container does not, and the failure
+    # arrives much later as NoSuchBucket from every single test.
+    mkdir -p "$DATA/minio"
+    start roam-minio \
+        -p "${S3_PORT}:9000" \
+        -e "MINIO_ROOT_USER=$KEY" \
+        -e "MINIO_ROOT_PASSWORD=$SECRET" \
+        -v "$DATA/minio:/data" \
+        minio/minio server /data
+    wait_for minio "http://127.0.0.1:${S3_PORT}/minio/health/live"
+
+    # Create the bucket, then turn on versioning so the version-history tests
+    # have history to browse. Without versioning they skip, which would look
+    # like passing.
+    S3KEY="$KEY" S3SECRET="$SECRET" HOSTPORT="127.0.0.1:${S3_PORT}" BUCKET="$BUCKET" \
+    python3 - <<'PYEOF'
+import datetime, hashlib, hmac, os, sys, urllib.request, urllib.error
+
+key, secret = os.environ["S3KEY"], os.environ["S3SECRET"]
+host, bucket = os.environ["HOSTPORT"], os.environ["BUCKET"]
+region, service = "us-east-1", "s3"
+
+def sign(k, m):
+    return hmac.new(k, m.encode(), hashlib.sha256).digest()
+
+def put(query, body, what, ok_codes=(200,)):
+    """Signed PUT on the bucket. `query` is the canonical query string, which
+    must be sorted by key — a single flag sorts trivially."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    amzdate, datestamp = now.strftime("%Y%m%dT%H%M%SZ"), now.strftime("%Y%m%d")
+    payload = hashlib.sha256(body).hexdigest()
+
+    canonical = "\n".join([
+        "PUT", f"/{bucket}", query,
+        f"host:{host}", f"x-amz-content-sha256:{payload}", f"x-amz-date:{amzdate}", "",
+        "host;x-amz-content-sha256;x-amz-date", payload,
+    ])
+    scope = f"{datestamp}/{region}/{service}/aws4_request"
+    to_sign = "\n".join(["AWS4-HMAC-SHA256", amzdate, scope,
+                         hashlib.sha256(canonical.encode()).hexdigest()])
+    k = sign(("AWS4" + secret).encode(), datestamp)
+    for part in (region, service, "aws4_request"):
+        k = sign(k, part)
+    sig = hmac.new(k, to_sign.encode(), hashlib.sha256).hexdigest()
+
+    url = f"http://{host}/{bucket}" + (f"?{query.rstrip('=')}" if query else "")
+    req = urllib.request.Request(url, data=body, method="PUT")
+    req.add_header("x-amz-date", amzdate)
+    req.add_header("x-amz-content-sha256", payload)
+    req.add_header("Authorization",
+                   f"AWS4-HMAC-SHA256 Credential={key}/{scope}, "
+                   f"SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature={sig}")
+    try:
+        with urllib.request.urlopen(req) as resp:
+            print(f"bucket {bucket}: {what} ({resp.status})", file=sys.stderr)
+            return True
+    except urllib.error.HTTPError as e:
+        # A bucket that is already there is not a problem; anything else is, and
+        # it has to be loud — every test would otherwise fail with NoSuchBucket
+        # and point at the tests rather than at this script.
+        if e.code == 409:
+            print(f"bucket {bucket}: already exists", file=sys.stderr)
+            return True
+        print(f"bucket {bucket}: {what} -> {e.code} {e.read()[:200]!r}", file=sys.stderr)
+        return False
+
+if not put("", b"", "created"):
+    sys.exit(1)
+if not put("versioning=",
+           b'<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+           b'<Status>Enabled</Status></VersioningConfiguration>',
+           "versioning enabled"):
+    sys.exit(1)
+PYEOF
+}
+
+up_azblob() {
+    start roam-azurite \
+        -p "${AZ_PORT}:10000" \
+        mcr.microsoft.com/azure-storage/azurite \
+        azurite-blob --blobHost 0.0.0.0 --skipApiVersionCheck
+    # 403 means it is answering and demanding auth, which is as far as an
+    # unsigned request gets.
+    wait_for azurite "http://127.0.0.1:${AZ_PORT}/${AZ_ACCOUNT}?comp=list" 403
+
+    # Azurite does not create containers on demand, and OpenDAL will not create
+    # one either, so it has to be done here with a signed request.
+    ACCOUNT="$AZ_ACCOUNT" AZKEY="$AZ_KEY" HOSTPORT="127.0.0.1:${AZ_PORT}" \
+    CONTAINER="$BUCKET" python3 - <<'PYEOF'
+import base64, hashlib, hmac, os, sys, urllib.request, urllib.error
+from email.utils import formatdate
+
+account, key = os.environ["ACCOUNT"], os.environ["AZKEY"]
+host, container = os.environ["HOSTPORT"], os.environ["CONTAINER"]
+version = "2021-08-06"
+
+date = formatdate(usegmt=True)
+canon_headers = f"x-ms-date:{date}\nx-ms-version:{version}\n"
+# Azurite is path-style, so the account appears both in the URI path and in the
+# canonicalized-resource prefix.
+canon_resource = f"/{account}/{account}/{container}\nrestype:container"
+to_sign = f"PUT\n\n\n\n\n\n\n\n\n\n\n\n{canon_headers}{canon_resource}"
+sig = base64.b64encode(
+    hmac.new(base64.b64decode(key), to_sign.encode(), hashlib.sha256).digest()
+).decode()
+
+req = urllib.request.Request(
+    f"http://{host}/{account}/{container}?restype=container", method="PUT"
+)
+req.add_header("x-ms-date", date)
+req.add_header("x-ms-version", version)
+req.add_header("Authorization", f"SharedKey {account}:{sig}")
+req.add_header("Content-Length", "0")
+try:
+    with urllib.request.urlopen(req) as resp:
+        print(f"container {container}: created ({resp.status})", file=sys.stderr)
+except urllib.error.HTTPError as e:
+    # 409 is "already there", which is fine.
+    print(f"container {container}: {'already exists' if e.code == 409 else e.code}", file=sys.stderr)
+PYEOF
+}
+
+up_gcs() {
+    # The bucket is created through the JSON API rather than by making a
+    # directory under the data root. fake-gcs-server does adopt a directory as a
+    # bucket, but only when it and we share a filesystem — see up_s3.
+    mkdir -p "$DATA/gcs"
+    start roam-gcs \
+        -p "${GCS_PORT}:4443" \
+        -v "$DATA/gcs:/data" \
+        fsouza/fake-gcs-server \
+        -scheme http -port 4443 -backend filesystem -filesystem-root /data
+    wait_for fake-gcs "http://127.0.0.1:${GCS_PORT}/storage/v1/b"
+
+    local code
+    code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+                -H 'Content-Type: application/json' \
+                -d "{\"name\":\"${BUCKET}\"}" \
+                "http://127.0.0.1:${GCS_PORT}/storage/v1/b?project=roam-test")
+    case "$code" in
+        200|409) echo "bucket ${BUCKET}: gcs ready (${code})" >&2 ;;
+        *)       echo "bucket ${BUCKET}: gcs create -> ${code}" >&2; return 1 ;;
+    esac
+}
+
+up_webdav() {
+    mkdir -p "$DATA/dav"
+    start roam-dav \
+        -p "${DAV_PORT}:80" \
+        -e "USERNAME=$KEY" \
+        -e "PASSWORD=$SECRET" \
+        -v "$DATA/dav:/var/lib/dav/data" \
+        bytemark/webdav
+    wait_for webdav "http://${KEY}:${SECRET}@127.0.0.1:${DAV_PORT}/" any
+}
+
+up_sftp() {
+    # A dedicated keypair under the data dir, so nothing touches ~/.ssh. The
+    # sftp backend authenticates the way `ssh` does, which means the key has to
+    # exist as a file — there is no way to hand it bytes from a keychain.
+    mkdir -p "$DATA/sftp/data" "$DATA/sftp/keys"
+    if [ ! -f "$DATA/sftp/keys/id_ed25519" ]; then
+        ssh-keygen -t ed25519 -N "" -C roam-test \
+            -f "$DATA/sftp/keys/id_ed25519" >/dev/null
+    fi
+
+    local fresh=1
+    [ -n "$(docker ps -q -f name='^roam-sftp$')" ] && fresh=0
+
+    start roam-sftp \
+        -p "${SFTP_PORT}:22" \
+        -v "$DATA/sftp/data:/home/${KEY}/upload" \
+        atmoz/sftp "${KEY}::1001"
+
+    # The public key is copied in rather than bind-mounted. `docker run -v`
+    # resolves the source path in the *daemon's* filesystem, not ours, so a bind
+    # mount silently delivers an empty file whenever the daemon lives somewhere
+    # else — a CI runner that executes steps inside a container, or Docker
+    # Desktop with an unshared path. An empty data directory is harmless, but an
+    # empty authorized key means sshd never accepts us and the wait below just
+    # times out with nothing explaining why. `docker cp` goes through the API,
+    # so it works in both cases.
+    #
+    # The directory only exists once the entrypoint has created the user, hence
+    # start → copy → restart, which is also how the image itself ingests keys.
+    if [ "$fresh" = 1 ]; then
+        for _ in $(seq 1 30); do
+            docker exec roam-sftp test -d "/home/${KEY}" 2>/dev/null && break
+            sleep 0.2
+        done
+        docker exec roam-sftp mkdir -p "/home/${KEY}/.ssh/keys"
+        docker cp "$DATA/sftp/keys/id_ed25519.pub" \
+                  "roam-sftp:/home/${KEY}/.ssh/keys/id_ed25519.pub" >/dev/null
+        docker restart roam-sftp >/dev/null
+    fi
+
+    printf 'waiting for sftp' >&2
+    for _ in $(seq 1 60); do
+        # The image refuses shell sessions, so a successful *connection* is what
+        # we wait for, whatever it says afterwards. The output is captured rather
+        # than piped into grep: `ssh` exits non-zero here, and under
+        # `set -o pipefail` that would fail the whole pipeline even when grep
+        # matched.
+        local probe
+        probe=$(ssh -i "$DATA/sftp/keys/id_ed25519" -p "$SFTP_PORT" \
+                    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                    -o BatchMode=yes -o ConnectTimeout=2 \
+                    "${KEY}@127.0.0.1" true 2>&1 || true)
+        case "$probe" in
+            *"sftp connections only"*)
+                echo " ready" >&2
+                return 0
+                ;;
+        esac
+        printf . >&2
+        sleep 0.5
+    done
+    echo " timed out" >&2
+    return 1
+}
+
+env_block() {
+    cat <<EOF
+export ROAM_S3_ENDPOINT=http://127.0.0.1:${S3_PORT}
+export ROAM_S3_BUCKET=${BUCKET}
+export ROAM_S3_KEY=${KEY}
+export ROAM_S3_SECRET=${SECRET}
+export ROAM_AZBLOB_ENDPOINT=http://127.0.0.1:${AZ_PORT}/${AZ_ACCOUNT}
+export ROAM_AZBLOB_CONTAINER=${BUCKET}
+export ROAM_AZBLOB_ACCOUNT=${AZ_ACCOUNT}
+export ROAM_AZBLOB_KEY='${AZ_KEY}'
+export ROAM_GCS_ENDPOINT=http://127.0.0.1:${GCS_PORT}
+export ROAM_GCS_BUCKET=${BUCKET}
+export ROAM_WEBDAV_ENDPOINT=http://127.0.0.1:${DAV_PORT}
+export ROAM_WEBDAV_USER=${KEY}
+export ROAM_WEBDAV_PASSWORD=${SECRET}
+export ROAM_SFTP_ENDPOINT=ssh://127.0.0.1:${SFTP_PORT}
+export ROAM_SFTP_USER=${KEY}
+export ROAM_SFTP_KEY=${DATA}/sftp/keys/id_ed25519
+EOF
+}
+
+# `export KEY=value` for a human to `eval`; bare `KEY=value` for CI to append to
+# $GITHUB_ENV, which does not accept `export`.
+#
+# The single quotes around the azblob key are there so a shell `eval` does not
+# choke on its `/` and `+` characters. $GITHUB_ENV takes values literally, so
+# they have to come off — otherwise the quotes become part of the key and
+# authentication fails with a signature error that looks nothing like the cause.
+bare_env_block() {
+    env_block | sed -e 's/^export //' -e "s/='\(.*\)'$/=\1/"
+}
+
+BACKEND=${2:-all}
+
+case "${1:-up}" in
+    up|test)
+        require_docker
+        case "$BACKEND" in
+            s3) up_s3 ;;
+            azblob) up_azblob ;;
+            gcs) up_gcs ;;
+            webdav) up_webdav ;;
+            sftp) up_sftp ;;
+            all) up_s3; up_azblob; up_gcs; up_webdav; up_sftp ;;
+            *) echo "unknown backend: $BACKEND" >&2; exit 2 ;;
+        esac
+
+        if [ "${1}" = "up" ]; then
+            if [ "${BARE_ENV:-0}" = "1" ]; then
+                bare_env_block
+            else
+                env_block
+            fi
+            exit 0
+        fi
+
+        # shellcheck disable=SC2046
+        eval "$(env_block)"
+
+        # Serialised: the tests share one bucket under per-test prefixes, and the
+        # S3 paging test alone uploads a thousand objects.
+        if [ "$BACKEND" = "s3" ] || [ "$BACKEND" = "all" ]; then
+            cargo test -p roam-core --test s3 -- --test-threads=1
+            cargo test -p roam-ui s3_tests
+        fi
+        if [ "$BACKEND" != "s3" ]; then
+            cargo test -p roam-core --test backends -- --test-threads=1
+        fi
+        ;;
+    down)
+        docker rm -f roam-minio roam-azurite roam-gcs roam-dav roam-sftp >/dev/null 2>&1 || true
+        rm -rf "$DATA"
+        echo "stopped and removed the test backends"
+        ;;
+    *)
+        echo "usage: $0 {up|test|down} [s3|azblob|gcs|webdav|sftp|all]" >&2
+        exit 2
+        ;;
+esac

@@ -1,0 +1,27 @@
+[package]
+name = "roam-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Backend-agnostic core for Roam: VFS over OpenDAL, listing cache, tokio bridge"
+
+[dependencies]
+opendal.workspace = true
+tokio.workspace = true
+futures.workspace = true
+thiserror.workspace = true
+jiff.workspace = true
+dashmap.workspace = true
+tracing.workspace = true
+bytes.workspace = true
+serde.workspace = true
+toml.workspace = true
+keyring.workspace = true
+directories.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "time"] }
+tempfile = "3"
+# The S3 integration tests fetch a presigned URL with no credentials attached,
+# which needs a plain HTTP client.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }

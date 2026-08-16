@@ -1,0 +1,21 @@
+[package]
+name = "roam-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "GPUI view layer for Roam"
+
+[dependencies]
+roam-core.workspace = true
+gpui.workspace = true
+gpui-component.workspace = true
+rust-embed.workspace = true
+jiff.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+gpui = { version = "0.2.2", features = ["test-support"] }
+tempfile = "3"
+# The same rasteriser gpui renders svgs with (it keeps its `SvgRenderer` private),
+# so the icon test exercises the real parse-and-draw path rather than a stand-in.
+resvg = "0.45"

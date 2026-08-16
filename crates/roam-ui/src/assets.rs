@@ -1,0 +1,204 @@
+//! The application's asset source.
+//!
+//! gpui-component names its icons by relative path — `IconName::ArrowLeft`
+//! resolves to `icons/arrow-left.svg` — but the crate does **not** ship the SVG
+//! files. Supplying them is the application's job, and the failure mode when it
+//! doesn't is silent in both layers:
+//!
+//! 1. `Application::new()` installs `()` as the asset source, whose `load()`
+//!    answers every path with `Ok(None)`.
+//! 2. gpui's svg renderer treats `Ok(None)` as "nothing to draw" and returns
+//!    without a log line or an error.
+//!
+//! So every icon in the app renders as empty space. On a `.ghost()` icon-only
+//! button that leaves nothing at all to see until the pointer hovers and paints
+//! a background — which is exactly how the bug was reported: "the button only
+//! appears when the mouse passes over it".
+//!
+//! The icons are lucide (ISC), plus the handful gpui-component defines itself
+//! that lucide has no equivalent for; see `assets/icons/ATTRIBUTION.md`.
+
+use std::borrow::Cow;
+
+use gpui::{AssetSource, Result, SharedString};
+use rust_embed::RustEmbed;
+
+/// Embeds `crates/roam-ui/assets/` into the binary, so a built app has its icons
+/// wherever it runs — no directory to install next to the executable.
+#[derive(RustEmbed)]
+#[folder = "assets/"]
+#[include = "icons/*.svg"]
+pub struct Assets;
+
+impl AssetSource for Assets {
+    fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        Ok(Self::get(path).map(|file| file.data))
+    }
+
+    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        Ok(Self::iter()
+            .filter(|p| p.starts_with(path))
+            .map(|p| SharedString::from(p.to_string()))
+            .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui_component::{IconName, IconNamed};
+    use resvg::usvg;
+
+    use super::*;
+
+    /// Every icon our own views reference, derived from the sources so the test
+    /// cannot drift out of date: a view that starts using an icon we never
+    /// vendored fails here, at the one place that can still explain why. Left to
+    /// itself the only symptom is invisible-but-clickable space in a running app.
+    ///
+    /// Several are reachable only through a conditional — `Sun`/`Moon` on the
+    /// theme toggle, `ChevronUp` on a collapsed transfer panel — so reading the
+    /// button definitions by eye does not find them all.
+    fn icon_paths_referenced_by_our_sources() -> Vec<String> {
+        let sources = [
+            include_str!("browser.rs"),
+            include_str!("connection_form.rs"),
+            include_str!("delegate.rs"),
+            include_str!("dir_tree.rs"),
+            include_str!("name_dialog.rs"),
+            include_str!("preview.rs"),
+            include_str!("transfer_panel.rs"),
+            include_str!("workspace.rs"),
+        ];
+
+        let mut paths: Vec<String> = Vec::new();
+        for src in sources {
+            for (ix, _) in src.match_indices("IconName::") {
+                let variant: String = src[ix + "IconName::".len()..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric())
+                    .collect();
+                if variant.is_empty() {
+                    continue;
+                }
+
+                // `IconName` owns the mapping but can neither be enumerated nor
+                // even formatted, so the filename is derived the way
+                // gpui-component spells them: every uppercase letter and every
+                // digit starts a new kebab segment (`Settings2` → `settings-2`).
+                let mut file = String::new();
+                for (i, c) in variant.char_indices() {
+                    if i > 0 && (c.is_ascii_uppercase() || c.is_ascii_digit()) {
+                        file.push('-');
+                    }
+                    file.push(c.to_ascii_lowercase());
+                }
+
+                let path = format!("icons/{file}.svg");
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+        }
+        paths
+    }
+
+    #[test]
+    fn every_icon_our_views_use_actually_resolves() {
+        let paths = icon_paths_referenced_by_our_sources();
+        assert!(
+            paths.len() >= 25,
+            "only found {} icon references — the scan itself broke",
+            paths.len()
+        );
+
+        for path in paths {
+            let loaded = Assets.load(&path).expect("asset source");
+            assert!(
+                loaded.is_some_and(|bytes| !bytes.is_empty()),
+                "{path} is missing from assets/, so it would render as empty space"
+            );
+        }
+    }
+
+    /// The derivation above has to agree with gpui-component's own spelling, so
+    /// pin the two together — including on the name that exercises the digit rule.
+    #[test]
+    fn the_derived_filename_matches_gpui_components_mapping() {
+        assert_eq!(IconName::Settings2.path(), "icons/settings-2.svg");
+        assert_eq!(IconName::LoaderCircle.path(), "icons/loader-circle.svg");
+        assert_eq!(IconName::TriangleAlert.path(), "icons/triangle-alert.svg");
+        assert_eq!(IconName::Plus.path(), "icons/plus.svg");
+    }
+
+    /// gpui-component renders icons we never name ourselves — the table's sort
+    /// arrows, a dialog's close button, the scrollbar's resize corner. Those go
+    /// through the same asset source, so the vendored set has to cover every
+    /// path the component library can ask for, not just ours.
+    #[test]
+    fn the_vendored_set_covers_all_of_gpui_components_icons() {
+        let count = Assets::iter().count();
+        assert_eq!(
+            count, 86,
+            "gpui-component 0.5.1 references 86 icon paths; \
+             assets/icons has {count}. If the dependency changed, re-derive the \
+             list from its icon.rs and vendor what is missing."
+        );
+    }
+
+    #[test]
+    fn a_path_we_never_vendored_reports_missing_rather_than_empty_bytes() {
+        // Guards the distinction the bug hinged on: `Ok(None)` is silent, so the
+        // asset source must be the layer that can tell us a path is unknown.
+        assert!(Assets.load("icons/not-a-real-icon.svg").unwrap().is_none());
+    }
+
+    /// Resolving a path is not the same as drawing something. gpui rasterises an
+    /// svg and keeps only the alpha channel, so a file that parses but covers no
+    /// pixels is *still* an invisible button — the very symptom this module
+    /// exists to prevent. This renders every icon the way gpui does and asserts
+    /// there is ink on the page, which is what makes the ten hand-drawn ones
+    /// trustworthy.
+    #[test]
+    fn every_icon_rasterises_to_visible_pixels() {
+        let options = usvg::Options::default();
+
+        for path in Assets::iter() {
+            let bytes = Assets.load(&path).unwrap().expect("embedded");
+            let tree = usvg::Tree::from_data(&bytes, &options)
+                .unwrap_or_else(|e| panic!("{path} does not parse as svg: {e}"));
+
+            // 16px is the size these actually render at in the toolbar.
+            let scale = 16.0 / tree.size().width();
+            let mut pixmap = resvg::tiny_skia::Pixmap::new(16, 16).unwrap();
+            resvg::render(
+                &tree,
+                resvg::tiny_skia::Transform::from_scale(scale, scale),
+                &mut pixmap.as_mut(),
+            );
+
+            let inked = pixmap.pixels().iter().filter(|p| p.alpha() > 0).count();
+            let total = pixmap.pixels().len();
+            let coverage = inked as f32 / total as f32;
+
+            assert!(
+                coverage > 0.02,
+                "{path} rasterises to {:.1}% coverage — it would be invisible",
+                coverage * 100.0
+            );
+            // A glyph that fills its whole box is a solid block, not an icon;
+            // usually it means a stray `fill` on the root or a bad viewBox.
+            assert!(
+                coverage < 0.95,
+                "{path} covers {:.1}% of its box — that is a filled square",
+                coverage * 100.0
+            );
+        }
+    }
+
+    #[test]
+    fn listing_returns_the_icon_directory() {
+        let listed = Assets.list("icons/").unwrap();
+        assert_eq!(listed.len(), 86);
+        assert!(listed.iter().all(|p| p.ends_with(".svg")));
+    }
+}

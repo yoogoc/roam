@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Deliberately *not* `RUSTFLAGS: -D warnings`: that applies to the whole
+  # dependency tree, so one upstream release could fail CI for a reason that has
+  # nothing to do with this code — and the failure would look like ours. Denying
+  # warnings is passed to clippy instead, where it only covers our crates.
+
+jobs:
+  # `roam-core` has no gpui dependency, which is the point of the layering — so
+  # it builds and tests on a plain Linux runner with no graphics stack at all.
+  # That also makes it the natural place to run the backend integration tests,
+  # since every server they need is a Linux container.
+  core:
+    name: core (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy -p roam-core --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test -p roam-core
+
+      # Real protocols: signing, XML/JSON parsing, listing pagination, multipart
+      # and one-shot uploads, presigning, PROPFIND, ssh. Everything above this
+      # runs against OpenDAL's local `fs` service and never touches a socket.
+      - name: Start the backend servers
+        run: BARE_ENV=1 scripts/test-backends.sh up all >> "$GITHUB_ENV"
+
+      - name: S3 integration
+        run: cargo test -p roam-core --test s3 -- --test-threads=1
+
+      - name: azblob / gcs / webdav / sftp integration
+        run: cargo test -p roam-core --test backends -- --test-threads=1
+
+      - name: Scale
+        # The disk-backed part creates 100k files, so it is opt-in even here.
+        run: ROAM_SCALE_FS=1 cargo test --release -p roam-core --test scale -- --nocapture
+
+      - name: Stop the backend servers
+        if: always()
+        run: scripts/test-backends.sh down
+
+  # The view layer needs gpui, so this runs where the app is actually developed
+  # and shipped. Keeping it separate means a core-only change gets its answer
+  # from the fast Linux job.
+  ui:
+    name: ui (macos)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        # Includes the GPUI view tests: they drive real views through
+        # TestAppContext and dispatch real keystrokes.
+        run: cargo test --workspace
+
+      - name: Build the examples
+        # They are the only thing that exercises real text layout and image
+        # decoding, so at minimum they must keep compiling. Running them needs a
+        # window server, which a runner does not have.
+        run: cargo build -p roam-ui --examples
