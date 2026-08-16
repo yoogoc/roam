@@ -11,7 +11,6 @@ use tokio::task::JoinHandle;
 
 use crate::menu::{self, MenuItem};
 use crate::profile::Profile;
-use crate::secrets::SecretStore;
 use crate::transfer::{CHUNK, TaskProgress, WRITER_CONCURRENCY};
 use crate::{DirEntry, Error, ObjectVersion, Result, Rt, path};
 
@@ -122,8 +121,8 @@ impl Vfs {
     }
 
     /// Build a session from a saved profile, pulling credentials from `store`.
-    pub fn from_profile(rt: Rt, profile: &Profile, store: &dyn SecretStore) -> Result<Self> {
-        let options = profile.connect_options(store)?;
+    pub fn from_profile(rt: Rt, profile: &Profile) -> Result<Self> {
+        let options = profile.connect_options()?;
 
         // `from_uri` takes a single argument; options ride along as a tuple.
         let op = Operator::from_uri((profile.uri.as_str(), options))?
@@ -1143,12 +1142,7 @@ mod tests {
             .options
             .insert("root".into(), dir.path().to_str().unwrap().to_string());
 
-        let vfs = Vfs::from_profile(
-            Rt::from_current().unwrap(),
-            &profile,
-            &crate::MemorySecrets::new(),
-        )
-        .unwrap();
+        let vfs = Vfs::from_profile(Rt::from_current().unwrap(), &profile).unwrap();
 
         let entries = vfs.list_all("").await.unwrap();
         assert_eq!(entries.len(), 1);
@@ -1158,17 +1152,17 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_credential_stops_the_session_from_being_built() {
-        let mut profile = crate::Profile::new("prod", "Prod S3", "s3://bucket/prefix");
-        profile.secrets = vec!["secret_access_key".into()];
+        // Nothing but a URI: the service schema says S3 cannot connect without
+        // keys, so this has to fail here rather than as an opaque 403 later.
+        let profile = crate::Profile::new("prod", "Prod S3", "s3://bucket/prefix");
 
-        let err = Vfs::from_profile(
-            Rt::from_current().unwrap(),
-            &profile,
-            &crate::MemorySecrets::new(),
-        )
-        .unwrap_err();
+        let err = Vfs::from_profile(Rt::from_current().unwrap(), &profile).unwrap_err();
 
-        assert!(err.user_message().contains("secret_access_key"));
+        assert!(
+            err.user_message().contains("Access Key ID"),
+            "should name the missing field: {}",
+            err.user_message()
+        );
         assert_eq!(err.recovery(), Some(crate::Recovery::OpenSettings));
     }
 
@@ -1178,17 +1172,14 @@ mod tests {
 
         let mut s3 = crate::Profile::new("prod", "Prod S3", "s3://bucket/prefix");
         s3.options.insert("region".into(), "us-east-1".into());
-        s3.secrets = vec!["access_key_id".into(), "secret_access_key".into()];
-
-        let secrets = crate::MemorySecrets::new();
-        secrets.set("prod", "access_key_id", "AKIAEXAMPLE").unwrap();
-        secrets
-            .set("prod", "secret_access_key", "not-real")
-            .unwrap();
+        s3.options
+            .insert("access_key_id".into(), "AKIAEXAMPLE".into());
+        s3.options
+            .insert("secret_access_key".into(), "not-real".into());
 
         // Building an Operator performs no network IO, so this is a pure check
         // of what the service advertises.
-        let s3 = Vfs::from_profile(rt.clone(), &s3, &secrets).unwrap();
+        let s3 = Vfs::from_profile(rt.clone(), &s3).unwrap();
 
         let dir = tempfile::tempdir().unwrap();
         let local = Vfs::local(rt, dir.path().to_str().unwrap()).unwrap();

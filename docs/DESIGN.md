@@ -194,20 +194,42 @@ let op = Operator::from_uri((profile.uri.as_str(), options))?
 
 `opendal` 现在只是一个 facade：核心在 `opendal-core`，每个 service 和 layer 都是独立 crate，通过 feature 挂进 `opendal::services::*` / `opendal::layers::*`。实际影响是 feature 必须显式列全 —— `default-features = false` 会同时关掉 `auto-register-services` 和 `executors-tokio`，而 `from_uri` 依赖前者。M1 只开 `services-fs`，**不开** `http-transport-reqwest`（fs 用不到 reqwest，省掉大量编译时间），M2 接云端时再加。
 
-### 凭据
+### 凭据（已按用户要求改为不进钥匙串）
 
-配置文件**只存非敏感元信息**：名称、URI、region、endpoint，以及需要哪些凭据的**键名**。secret / access key 走系统钥匙串（`keyring` 4.x 的 `v1` feature，macOS Keychain / Windows Credential Manager / Linux Secret Service），账号为 `<profile id>/<option key>`。明文 secret 永不落盘。
+> **这一节被推翻过一次。** 原设计是：配置文件只存键名，secret 走系统钥匙串,`Profile::validate()` 按键名片段拦截任何看起来像凭据的 option。用户明确要求**不写入系统钥匙串**,所以现在凭据和其他选项一起存在配置文件里。原方案的「明文永不落盘」不再成立,这里如实记录取舍,而不是留着一段已经失效的安全声明。
 
-实际路径由 `directories` 决定（macOS 是 `~/Library/Application Support/dev.roam.Roam/profiles.toml`）；`ROAM_CONFIG` 环境变量可覆盖，试运行时用它就不会碰到真实配置目录。
+配置文件存**全部**连接信息:名称、URI、region、endpoint,以及凭据本身。实际路径由 `directories` 决定（macOS 是 `~/Library/Application Support/dev.roam.Roam/profiles.toml`）；`ROAM_CONFIG` 可覆盖。
 
-三条让「明文不落盘」成为事实而非愿望的措施：
+- **文件权限 `0600`** —— 现在这是唯一的保护措施,而不再是「文件本来也不含 secret,顺手加固」。
+- **哪些字段是凭据由 schema 说了算**,不再靠键名猜。`Profile::secret_keys()` 和表单的掩码用的是同一个来源（`service::Field::is_secret()`）。原来那套片段匹配会把 `access_key_id` 也判成凭据 —— 它其实不是,而 schema 知道这一点。
+- **编辑时凭据会回显**。原设计故意留空表示「沿用」,但那是钥匙串时代的产物:值现在就在 profile 里,藏起来只会让「改一下 region」变成「顺手清空密码」。
+- **原来的拦截被反转**:`Profile::validate()` 不再拒绝带凭据的 option —— 它当初会拒绝的,恰好就是现在表单产出的每一个 profile。测试也跟着反转了,并且是**显式断言凭据确实写在文件里**（`the_saved_file_does_contain_the_credential`）,而不是留一个模糊的空缺让人推断。
 
-- **保存前拦截**：`Profile::validate()` 扫描所有 option 键名，命中 `secret / password / token / credential / access_key / account_key / api_key / private_key` 任一片段就拒绝保存，并提示改填到凭据栏。按片段而非全等匹配，一张表就能覆盖各家拼法（azblob 的 `account_key`、GCS 的 `credential`）。
-- **验证失败不写文件**：`ProfileStore::save` 先全量 validate 再落盘，不会留下半个坏文件。
-- **不回显凭据**：编辑连接时凭据栏是空的 —— 不从钥匙串读回来填。留空表示沿用已存的值，填了才替换。
-- 文件权限 `0600`（它虽然不含 secret，但描述了别人的基础设施）。
+**能拿到这个文件的人就能拿到这些凭据。** 它不适合同步、提交或粘进 issue —— 原来的设计可以,现在不行。UI 上也写了一行说明,不靠用户自己推断。
 
-`Profile::id` 是稳定标识，同时充当钥匙串账号前缀，**改名不会改 id** —— 否则已存的凭据会立刻失联。新建时用 `unique_id` 生成，撞名自动加 `-2`、`-3`。
+`Profile::id` 仍是稳定标识,改名不改 id。
+
+### 连接表单:由 schema 生成
+
+原来的新建/编辑连接是两个自由文本框,要手写 URI 和 `key = value` 行。option 名拼错要等到连接时才知道,而且错误信息来自服务端,不指向那一行。
+
+现在 `roam-core/src/service.rs` 一张表驱动三件此前可以各说各话的事:**表单渲染哪些字段**、**保存时校验什么**、**交给 OpenDAL 的 options**。表里的 option 名不是我编的 —— 每一个都是集成测试已经真连上去用过的键。
+
+- `Role` 决定值的去向:`Option` 进 `options`,`UriHost`（bucket / container）和 `UriPrefix`（前缀 / 路径）**组合成 URI**,所以 URI 不用手写。一条规则覆盖全部六个后端:`scheme://{host}/{prefix}`。
+- `FieldKind` 决定渲染方式:`Secret` 掩码显示,`Toggle { on, off }` 渲染成开关 —— 因为 `enable_virtual_host_style` 要的是字符串 `"true"`/`"false"`,`known_hosts_strategy` 要的是 `"accept"`/`"strict"`,都不是布尔。
+- **切换服务类型会保留两边共有的字段**。s3 → gcs 时 bucket 和 endpoint 留下,S3 独有的 key 不跟过去。
+- 必填项缺失在**保存时**就报错并指名字段（"请填写 Access Key ID"),对话框保持打开不丢输入。
+
+写这个表单时找出两个真问题:
+
+- **开关处于关闭态不能写盘。** 原本把 off 值也写进 options,于是「打开编辑、只改 region、保存」会顺手给 profile 盖上一个用户从未表达过的 `enable_virtual_host_style = false`。往返一次必须是恒等变换 —— 这条由 `editing_without_changing_anything_leaves_the_profile_identical` 守着,它就是被这个 bug 逼出来的。
+- **fs 的目录该进 URI,不该当 option。** 原来 uri 固定 `fs:///` 加一个 `root` 选项。实测 OpenDAL 的 fs service 直接认 `fs:///path`（真列举验证过),所以目录改用 `UriPrefix`,顺带让手写的 `fs:///tmp` 这种 profile 继续有效。绝对路径需要保留前导斜杠,这由 `Field::absolute` 标记,否则表单会把 `/Users/x` 显示成 `Users/x`。
+
+**对话框不会滚动。** 表单一变长就露出来了:S3 有 7 个字段,内容直接跑到窗口下面去,没有滚动条。原因不是缺滚动能力 —— gpui-component 的 dialog **已经**把内容包在 `overflow_y_scrollbar()` 里了。问题是那个滚动区是无限高盒子里的 `flex_1`:dialog 只有 `w`/`max_w`,**没有任何纵向尺寸接口**,盒子会一直长高,内层于是永远不溢出,滚动条永远不出现。
+
+所以高度上限只能由我们这边给:字段列表限高并滚动,名称 / 类型 / 存储说明留在滚动区外常驻 —— 前两个说明「这是哪个连接」,第三个是那句不该让人滚动才能看到的话。上限按视口比例算(`viewport * 0.55`,下限 200px)而不是写死,否则小窗口下会退化成两行高的列表;这条由单测守着。
+
+验证:表单在真实平台文本栈下打开过（`examples/connection_dialog`,现在直接打开 **S3** 这个最高的表单 —— 窗口 672px 高时上限约 370px,而 7 个字段约 390–420px,所以这个例子真的触发了溢出而非空跑;窗口 900×672,无 abort —— 掩码输入和开关都是新东西,而 placeholder 那次崩溃的教训就是这类排版问题只在真实文本栈下暴露);另有一条**闭环测试**（`a_profile_built_the_way_the_form_builds_it_connects`）把「人会输入的值 → `build_profile` → 真实 MinIO 上传并列举」整条走通 —— 其余测试都是手搓 profile,只验证了 schema 自己,没验证过它对服务器是否成立。
 
 ---
 
@@ -405,11 +427,11 @@ crates/roam-core/   无 gpui 依赖 · 67 项测试
   fmt.rs       字节数 / 时间显示，缺失即 `—`
   profile.rs   Profile / ProfileStore（TOML）· 敏感键拦截 · slugify / unique_id
                · parse_kv_lines
-  secrets.rs   SecretStore trait · Keychain 实现 · MemorySecrets（测试用）
+  service.rs   每个后端的字段 schema（表单 · 校验 · options 三者共用）
   menu.rs      capability → 菜单项映射 · display_label · mutates / needs_confirmation
 crates/roam-ui/     17 项 gpui 集成测试
   workspace.rs      连接侧边栏 · 会话切换 · 连接对话框 · capability 徽章条
-  connection_form.rs 表单状态 → Draft（profile + 待写入凭据）
+  connection_form.rs schema 驱动的表单视图 → Profile
   browser.rs        工具栏 · 面包屑 · 导航 · generation 守卫 · 右键菜单动作
   delegate.rs       虚拟化 Table 的 TableDelegate · capability 驱动的右键菜单
 crates/roam/        main.rs，`roam [目录]`，ROAM_CONFIG 可覆盖配置路径
@@ -419,7 +441,7 @@ crates/roam/        main.rs，`roam [目录]`，ROAM_CONFIG 可覆盖配置路�
 
 **M1** —— tokio 桥接、`fs` service、虚拟化 Table、导航与面包屑。UI 测试用 `gpui::TestAppContext` 真正驱动视图：列举顺序、双击进目录、双击文件不动、两级下钻、上一级到根停住、后退 / 前进回溯、面包屑跟随、陈旧批次被 generation 挡掉、重访目录先出缓存。
 
-**M2** —— profile 配置、keyring 凭据分离、s3 / gcs / azblob / webdav、capability 驱动菜单。测试覆盖：首启无配置文件不报错、连接 profile 切换后端、切回本机不残留上一个后端的列举、缺凭据时**拒绝切换**并报错、切换会话清空历史、保存表单写出的 TOML 不含 secret 值、凭据误填进选项栏被拒且不落盘。
+**M2** —— profile 配置、凭据存储（当时走 keyring，后按用户要求改为随 profile 落盘，见 §5）、s3 / gcs / azblob / webdav、capability 驱动菜单。测试覆盖：首启无配置文件不报错、连接 profile 切换后端、切回本机不残留上一个后端的列举、缺凭据时**拒绝切换**并报错、切换会话清空历史、保存表单写出的 TOML（这两条后来随 §5 的改动反转了：现在断言凭据确实写在文件里）。
 
 会话切换测试用**两个不同的 fs 后端**（两个临时目录），所以切换是真的换了 Operator，而不是同一后端换路径。
 
@@ -698,7 +720,7 @@ WebDAV 那条集成测试因此**断言不变量而不是路径**：无论走续
 
 - 运行时依赖宿主机 `PATH` 里有可用的 `ssh` / `sftp`；
 - 主机密钥校验是系统的，所以连一台新服务器需要 `known_hosts_strategy` 策略（测试里用 `accept`）；
-- 认证走 ssh 的方式，**密钥必须是磁盘上的文件**。没有办法把钥匙串里的字节交给它 —— 所以 profile 里存的是密钥**路径**而不是 secret。这与「凭据只进钥匙串」的原则是冲突的，属于这个后端固有的限制，不是设计上的松懈。
+- 认证走 ssh 的方式，**密钥必须是磁盘上的文件**，所以 profile 里存的是密钥**路径**而不是密钥内容。这原本是「凭据只进钥匙串」原则的一个例外；那条原则现在已经不在了（见 §5），所以它也不再是例外 —— 表单把它渲染成一个路径字段。
 
 它的 capability 也和别人都不一样：**唯一同时支持分片写和原生重命名的后端**。
 

@@ -13,7 +13,7 @@ pub mod path;
 pub mod preview;
 pub mod profile;
 pub mod rt;
-pub mod secrets;
+pub mod service;
 pub mod transfer;
 pub mod tree;
 pub mod vfs;
@@ -28,7 +28,7 @@ pub use model::{
 pub use preview::{ImageKind, PreviewKind};
 pub use profile::{Profile, ProfileId, ProfileStore};
 pub use rt::Rt;
-pub use secrets::{Keychain, MemorySecrets, SecretStore};
+pub use service::{Field, FieldKind, Role, Service};
 pub use transfer::{
     Operation, TaskId, TaskProgress, TaskSnapshot, TaskState, Transfer, TransferEngine,
     plan_download, plan_duplicate_dir, plan_move_dir, plan_upload,

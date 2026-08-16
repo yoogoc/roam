@@ -26,7 +26,7 @@ use std::sync::Arc;
 use roam_core::transfer::{
     CHUNK, DEFAULT_CONCURRENCY, TaskProgress, TaskState, Transfer, TransferEngine,
 };
-use roam_core::{EntryKind, MemorySecrets, Profile, Rt, SecretStore, Vfs};
+use roam_core::{EntryKind, Profile, Rt, Vfs, service};
 
 struct Server {
     endpoint: String,
@@ -63,17 +63,14 @@ fn session(prefix: &str) -> Option<Vfs> {
     profile
         .options
         .insert("enable_virtual_host_style".into(), "false".into());
-    profile.secrets = vec!["access_key_id".into(), "secret_access_key".into()];
+    profile
+        .options
+        .insert("access_key_id".into(), server.key.clone());
+    profile
+        .options
+        .insert("secret_access_key".into(), server.secret.clone());
 
-    let secrets = MemorySecrets::new();
-    secrets
-        .set("s3-test", "access_key_id", &server.key)
-        .unwrap();
-    secrets
-        .set("s3-test", "secret_access_key", &server.secret)
-        .unwrap();
-
-    Some(Vfs::from_profile(Rt::from_current().unwrap(), &profile, &secrets).unwrap())
+    Some(Vfs::from_profile(Rt::from_current().unwrap(), &profile).unwrap())
 }
 
 /// A prefix unique to this process run.
@@ -399,15 +396,14 @@ async fn bad_credentials_surface_as_permission_denied() {
     profile
         .options
         .insert("enable_virtual_host_style".into(), "false".into());
-    profile.secrets = vec!["access_key_id".into(), "secret_access_key".into()];
+    profile
+        .options
+        .insert("access_key_id".into(), "wrong".into());
+    profile
+        .options
+        .insert("secret_access_key".into(), "alsowrong".into());
 
-    let secrets = MemorySecrets::new();
-    secrets.set("bad", "access_key_id", "wrong").unwrap();
-    secrets
-        .set("bad", "secret_access_key", "alsowrong")
-        .unwrap();
-
-    let vfs = Vfs::from_profile(Rt::from_current().unwrap(), &profile, &secrets).unwrap();
+    let vfs = Vfs::from_profile(Rt::from_current().unwrap(), &profile).unwrap();
     let err = vfs.list_all("").await.unwrap_err();
 
     // The message the connection dialog shows has to be the useful one.
@@ -761,4 +757,58 @@ async fn a_cancelled_move_leaves_the_source_objects_in_place() {
     // succeeded, so the source is still whole.
     assert_eq!(vfs.read_prefix("src/a.txt", 64).await.unwrap(), b"payload");
     assert_eq!(vfs.read_prefix("src/b.txt", 64).await.unwrap(), b"payload");
+}
+
+/// The form's output has to be a *working* profile, not merely a valid one.
+///
+/// Every other test here builds its profile by hand, which means the option names
+/// the connection form fills in were only ever checked against the schema — not
+/// against a server. This goes the whole way: the values a person would type,
+/// through `build_profile`, into a real connection.
+#[tokio::test]
+async fn a_profile_built_the_way_the_form_builds_it_connects() {
+    let Some(server) = server() else {
+        eprintln!("skipping: ROAM_S3_ENDPOINT is not set");
+        return;
+    };
+
+    let prefix = unique_prefix("form-built");
+    let values: std::collections::BTreeMap<String, String> = [
+        ("bucket", server.bucket.clone()),
+        ("prefix", prefix.clone()),
+        ("endpoint", server.endpoint.clone()),
+        ("region", "us-east-1".to_string()),
+        ("access_key_id", server.key.clone()),
+        ("secret_access_key", server.secret.clone()),
+        // MinIO is path-style, which is this toggle's off value.
+        ("enable_virtual_host_style", "false".to_string()),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect();
+
+    let profile = service::build_profile("form".into(), "MinIO".into(), "s3", &values).unwrap();
+
+    // The URI was composed, not typed.
+    assert_eq!(
+        profile.uri,
+        format!("s3://{}/{}", server.bucket, prefix.trim_end_matches('/'))
+    );
+
+    let vfs = Vfs::from_profile(Rt::from_current().unwrap(), &profile).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("hello.txt");
+    std::fs::write(&file, b"built by the form").unwrap();
+    vfs.upload_from(
+        file,
+        "hello.txt",
+        std::sync::Arc::new(roam_core::TaskProgress::new()),
+    )
+    .await
+    .unwrap();
+
+    let entries = vfs.list_all("").await.unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(&*entries[0].name, "hello.txt");
 }

@@ -14,7 +14,7 @@ use gpui::{
     AnyView, App, AppContext, Application, Bounds, Window, WindowBounds, WindowOptions, px, size,
 };
 use gpui_component::Root;
-use roam_core::{MemorySecrets, ProfileStore, Rt, Vfs};
+use roam_core::{ProfileStore, Rt, Vfs};
 use roam_ui::{Assets, Workspace};
 
 fn main() {
@@ -39,14 +39,8 @@ fn main() {
                 },
                 move |window: &mut Window, cx| {
                     let workspace = cx.new(|cx| {
-                        let workspace = Workspace::new(
-                            rt.clone(),
-                            store.clone(),
-                            Arc::new(MemorySecrets::new()),
-                            local.clone(),
-                            window,
-                            cx,
-                        );
+                        let workspace =
+                            Workspace::new(rt.clone(), store.clone(), local.clone(), window, cx);
 
                         // Deferred on purpose. `open_dialog` reaches for the
                         // window's root layer, so it cannot run before `Root` is
@@ -54,7 +48,9 @@ fn main() {
                         // update either, or gpui panics with "cannot update Root
                         // while it is already being updated".
                         cx.defer_in(window, |workspace, window, cx| {
-                            workspace.open_new_connection(window, cx);
+                            // S3 on purpose: seven fields is the tallest form, and the one
+                            // whose height showed that the dialog never scrolled.
+                            workspace.open_new_connection_for("s3", window, cx);
                         });
 
                         workspace

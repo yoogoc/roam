@@ -9,8 +9,14 @@ cargo run -- /some/path   # browse somewhere else
 ```
 
 Saved connections live in `profiles.toml` under the platform config directory
-(`ROAM_CONFIG` overrides the path). Credentials are **not** kept there — they go
-to the system keychain, and the config file records only which keys to look up.
+(`ROAM_CONFIG` overrides the path). **Credentials are stored there too, in
+plaintext**, at file mode `0600`. That is deliberate — the system keychain asked
+for permission on every launch — but it means the file is not safe to sync,
+commit, or paste into an issue, and anyone who can read it has the credentials.
+
+Connections are entered through a form generated per backend: pick S3, GCS, Azure
+Blob, WebDAV, SFTP or local disk and it asks for that service's fields, masks the
+secret ones, and composes the OpenDAL URI itself.
 
 ## Layout
 
@@ -30,13 +36,13 @@ boundary through `roam_core::rt::Rt::spawn`. See `docs/DESIGN.md` §2.
 ## Tests
 
 ```
-cargo test --workspace          # 303 pass; 258 are real, 45 skip (see below)
+cargo test --workspace          # 318 pass; 272 are real, 46 skip (see below)
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
-258 of those need nothing but a compiler: 163 in `roam-core`, 88 views, 7 scale.
-The other 45 are the backend integration tests, which report success by skipping
+272 of those need nothing but a compiler: 171 in `roam-core`, 94 views, 7 scale.
+The other 46 are the backend integration tests, which report success by skipping
 when no server is configured — `scripts/test-backends.sh` is what makes them run
 for real.
 

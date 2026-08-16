@@ -18,7 +18,7 @@ mod workspace;
 pub use actions::init;
 pub use assets::Assets;
 pub use browser::Browser;
-pub use connection_form::{ConnectionForm, Draft};
+pub use connection_form::ConnectionForm;
 pub use delegate::{EntriesDelegate, kind_label};
 pub use dir_tree::DirTreeView;
 pub use name_dialog::NameDialog;

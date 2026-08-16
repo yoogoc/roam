@@ -6,7 +6,7 @@ use gpui::{
     WindowOptions, px, size,
 };
 use gpui_component::Root;
-use roam_core::{Keychain, ProfileStore, Rt, Vfs};
+use roam_core::{ProfileStore, Rt, Vfs};
 use roam_ui::{Assets, Workspace};
 
 /// The always-available local session. Saved connections come from
@@ -67,14 +67,7 @@ fn main() -> Result<()> {
                 },
                 |window: &mut Window, cx| {
                     let workspace = cx.new(|cx| {
-                        Workspace::new(
-                            rt.clone(),
-                            store.clone(),
-                            Arc::new(Keychain),
-                            local.clone(),
-                            window,
-                            cx,
-                        )
+                        Workspace::new(rt.clone(), store.clone(), local.clone(), window, cx)
                     });
                     cx.new(|cx| Root::new(AnyView::from(workspace), window, cx))
                 },

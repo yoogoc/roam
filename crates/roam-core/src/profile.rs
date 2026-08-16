@@ -1,59 +1,37 @@
 //! Connection profiles.
 //!
-//! A profile is everything needed to build an `Operator` *except* the
-//! credentials: a name, an OpenDAL URI, and non-secret options like region or
-//! endpoint. Credentials are named in `secrets` and fetched from a
-//! [`SecretStore`] at connect time, so `profiles.toml` stays safe to read,
-//! sync, or paste into an issue.
+//! A profile is everything needed to build an `Operator`: a name, an OpenDAL
+//! URI, and the options — credentials included.
+//!
+//! **Credentials are stored in this file, in plaintext.** That is a deliberate
+//! choice, not an oversight: the platform keychain prompted for permission on
+//! every launch and made a saved connection feel unreliable. The file is created
+//! `0600`, so it is readable only by its owner, and [`crate::service`] marks
+//! which fields are secret so the form can mask them. What it is *not* is safe
+//! to sync, commit, or paste into an issue — the previous design was, and this
+//! one is not.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::secrets::SecretStore;
+use crate::service;
 use crate::{Error, Result};
 
 pub type ProfileId = String;
 
-/// Option keys that must never be written to disk.
-///
-/// Checked as a case-insensitive substring so that per-service spellings
-/// (`azblob` uses `account_key`, GCS uses `credential`) are all caught by one
-/// list rather than needing an entry per backend.
-pub const SENSITIVE_FRAGMENTS: &[&str] = &[
-    "secret",
-    "password",
-    "token",
-    "credential",
-    "access_key",
-    "account_key",
-    "api_key",
-    "private_key",
-];
-
-pub fn is_sensitive(key: &str) -> bool {
-    let key = key.to_lowercase();
-    SENSITIVE_FRAGMENTS
-        .iter()
-        .any(|fragment| key.contains(fragment))
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Profile {
-    /// Stable identifier, also the keychain account prefix. Renaming the
-    /// profile must not change it, or its credentials become unreachable.
+    /// Stable identifier. Renaming the profile must not change it.
     pub id: ProfileId,
     pub name: String,
     /// An OpenDAL URI: `fs:///Users/me`, `s3://bucket/prefix`,
     /// `webdav://host/dav`, `gcs://bucket`, `azblob://container`.
     pub uri: String,
-    /// Non-secret connection options only.
+    /// Everything `Operator::from_uri` needs, credentials included.
     #[serde(default)]
     pub options: BTreeMap<String, String>,
-    /// Option keys whose values live in the secret store.
-    #[serde(default)]
-    pub secrets: Vec<String>,
 }
 
 impl Profile {
@@ -63,7 +41,6 @@ impl Profile {
             name: name.into(),
             uri: uri.into(),
             options: BTreeMap::new(),
-            secrets: Vec::new(),
         }
     }
 
@@ -72,11 +49,12 @@ impl Profile {
         self.uri.split_once("://").map(|(s, _)| s).unwrap_or("")
     }
 
-    /// Reject anything that would put a credential on disk.
+    /// Reject a profile that cannot connect.
     ///
-    /// This is the guard that makes the "no plaintext secrets in the config
-    /// file" claim true rather than aspirational: it runs on every save, so a
-    /// caller cannot quietly stuff a secret into `options`.
+    /// Runs on every save and again at connect time. It no longer polices which
+    /// keys may be stored — credentials belong in `options` now — so what is
+    /// left is structural: an id, a usable URI, and whatever the service says it
+    /// cannot do without.
     pub fn validate(&self) -> Result<()> {
         if self.id.trim().is_empty() {
             return Err(Error::Config("连接 id 不能为空".into()));
@@ -88,44 +66,52 @@ impl Profile {
             )));
         }
 
-        for key in self.options.keys() {
-            if is_sensitive(key) {
-                return Err(Error::Config(format!(
-                    "选项 \"{key}\" 看起来是凭据，不能写进配置文件；请把它列入 secrets"
-                )));
+        // A URI whose scheme we have no schema for is still allowed through:
+        // OpenDAL supports more services than the form offers, and a profile
+        // hand-written for one of them should keep working.
+        if let Some(service) = service::for_scheme(self.scheme()) {
+            for field in service.fields {
+                if !field.required || field.role != service::Role::Option {
+                    continue;
+                }
+                if !self.options.contains_key(field.key) {
+                    return Err(Error::Config(format!(
+                        "连接 \"{}\" 缺少{}",
+                        self.name, field.label
+                    )));
+                }
             }
         }
 
         Ok(())
     }
 
-    /// Options to hand to `Operator::from_uri`, with credentials merged in.
-    ///
-    /// A credential named in `secrets` but absent from the store is an error
-    /// rather than an omission — connecting without it would fail later with a
-    /// far less obvious message.
-    pub fn connect_options(&self, store: &dyn SecretStore) -> Result<Vec<(String, String)>> {
+    /// Options to hand to `Operator::from_uri`.
+    pub fn connect_options(&self) -> Result<Vec<(String, String)>> {
         self.validate()?;
 
-        let mut out: Vec<(String, String)> = self
+        Ok(self
             .options
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+            .collect())
+    }
 
-        for key in &self.secrets {
-            match store.get(&self.id, key)? {
-                Some(value) => out.push((key.clone(), value)),
-                None => {
-                    return Err(Error::Config(format!(
-                        "连接 \"{}\" 缺少凭据 \"{key}\"，请重新填写",
-                        self.name
-                    )));
-                }
-            }
-        }
-
-        Ok(out)
+    /// Which of this profile's options hold credentials, for redaction.
+    ///
+    /// Derived from the service schema rather than from key spelling, so the
+    /// answer is the same one the form used when it decided what to mask.
+    pub fn secret_keys(&self) -> Vec<&str> {
+        let Some(service) = service::for_scheme(self.scheme()) else {
+            return Vec::new();
+        };
+        service
+            .fields
+            .iter()
+            .filter(|f| f.is_secret())
+            .map(|f| f.key)
+            .filter(|key| self.options.contains_key(*key))
+            .collect()
     }
 }
 
@@ -287,14 +273,18 @@ impl ProfileStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::secrets::MemorySecrets;
 
     fn s3_profile() -> Profile {
         let mut profile = Profile::new("prod-s3", "Prod S3", "s3://my-bucket/data");
         profile
             .options
             .insert("region".into(), "ap-northeast-1".into());
-        profile.secrets = vec!["access_key_id".into(), "secret_access_key".into()];
+        profile
+            .options
+            .insert("access_key_id".into(), "AKIA".into());
+        profile
+            .options
+            .insert("secret_access_key".into(), "shhh".into());
         profile
     }
 
@@ -306,45 +296,48 @@ mod tests {
     }
 
     #[test]
-    fn a_credential_in_options_is_rejected() {
+    fn a_credential_in_options_is_now_allowed() {
+        // The inverse of what this file used to assert. Credentials live in
+        // `options` now, so a profile carrying one must validate — the old guard
+        // would have rejected exactly the profiles the form produces.
+        let profile = s3_profile();
+        assert!(profile.options.contains_key("secret_access_key"));
+        profile.validate().unwrap();
+    }
+
+    #[test]
+    fn secret_keys_come_from_the_schema_not_from_spelling() {
+        let profile = s3_profile();
+        let mut keys = profile.secret_keys();
+        keys.sort();
+        assert_eq!(keys, vec!["secret_access_key"]);
+
+        // `access_key_id` reads like a credential but the schema calls it plain
+        // text, and the schema is what the form masked by — so redaction has to
+        // agree with it rather than guess from the name.
+        assert!(!keys.contains(&"access_key_id"));
+    }
+
+    #[test]
+    fn a_required_field_missing_from_options_is_rejected() {
         let mut profile = s3_profile();
-        profile
-            .options
-            .insert("secret_access_key".into(), "oops".into());
+        profile.options.remove("secret_access_key");
 
         let err = profile.validate().unwrap_err();
         assert!(
-            err.user_message().contains("secret_access_key"),
+            err.user_message().contains("Secret Access Key"),
             "got {}",
             err.user_message()
         );
     }
 
     #[test]
-    fn sensitive_detection_covers_per_service_spellings() {
-        for key in [
-            "secret_access_key",
-            "SECRET_ACCESS_KEY",
-            "password",
-            "session_token",
-            "credential",
-            "account_key",
-            "api_key",
-            "private_key",
-        ] {
-            assert!(is_sensitive(key), "{key} should be treated as a credential");
-        }
-
-        for key in [
-            "region",
-            "endpoint",
-            "root",
-            "bucket",
-            "container",
-            "server",
-        ] {
-            assert!(!is_sensitive(key), "{key} is not a credential");
-        }
+    fn a_scheme_with_no_schema_still_validates() {
+        // OpenDAL supports more services than the form offers; a hand-written
+        // profile for one of them must not be rejected for lacking fields we
+        // have no schema for.
+        let profile = Profile::new("x", "Exotic", "ipfs://somecid");
+        profile.validate().unwrap();
     }
 
     #[test]
@@ -354,13 +347,9 @@ mod tests {
     }
 
     #[test]
-    fn connect_options_merge_secrets_in() {
+    fn connect_options_hand_over_everything_including_credentials() {
         let profile = s3_profile();
-        let store = MemorySecrets::new();
-        store.set("prod-s3", "access_key_id", "AKIA").unwrap();
-        store.set("prod-s3", "secret_access_key", "shhh").unwrap();
-
-        let mut opts = profile.connect_options(&store).unwrap();
+        let mut opts = profile.connect_options().unwrap();
         opts.sort();
 
         assert_eq!(
@@ -375,14 +364,12 @@ mod tests {
 
     #[test]
     fn a_missing_credential_fails_loudly_at_connect_time() {
-        let profile = s3_profile();
-        let store = MemorySecrets::new();
-        store.set("prod-s3", "access_key_id", "AKIA").unwrap();
-        // secret_access_key was never stored.
+        let mut profile = s3_profile();
+        profile.options.remove("secret_access_key");
 
-        let err = profile.connect_options(&store).unwrap_err();
+        let err = profile.connect_options().unwrap_err();
         assert!(
-            err.user_message().contains("secret_access_key"),
+            err.user_message().contains("Secret Access Key"),
             "got {}",
             err.user_message()
         );
@@ -458,38 +445,32 @@ mod tests {
     }
 
     #[test]
-    fn the_saved_file_contains_no_secret_values() {
+    fn the_saved_file_does_contain_the_credential() {
+        // Asserted deliberately, and it is the inverse of what this test used to
+        // check. Credentials are in this file now; the protection is the file
+        // mode below, not their absence. A test that pretended otherwise would
+        // be the most misleading thing in the repo.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("profiles.toml");
-        let store = ProfileStore::at(&path);
-
-        let secrets = MemorySecrets::new();
-        secrets
-            .set("prod-s3", "secret_access_key", "TOP-SECRET")
-            .unwrap();
-        store.save(&[s3_profile()]).unwrap();
+        ProfileStore::at(&path).save(&[s3_profile()]).unwrap();
 
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(!text.contains("TOP-SECRET"), "secret leaked into {text}");
-        // The key *name* is recorded so we know what to fetch; the value is not.
-        assert!(text.contains("secret_access_key"));
+        assert!(text.contains("shhh"), "the credential should be here");
         assert!(text.contains("ap-northeast-1"));
     }
 
     #[test]
-    fn save_refuses_a_profile_carrying_a_credential() {
+    fn save_accepts_a_profile_carrying_a_credential() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("profiles.toml");
-        let store = ProfileStore::at(&path);
 
-        let mut bad = s3_profile();
-        bad.options.insert("password".into(), "hunter2".into());
+        let mut profile = s3_profile();
+        profile
+            .options
+            .insert("session_token".into(), "hunter2".into());
 
-        assert!(store.save(&[bad]).is_err());
-        assert!(
-            !path.exists(),
-            "nothing should be written when validation fails"
-        );
+        ProfileStore::at(&path).save(&[profile]).unwrap();
+        assert!(path.exists());
     }
 
     #[cfg(unix)]

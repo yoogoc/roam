@@ -53,9 +53,6 @@ jiff = "0.2.28"
 dashmap = "6"
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
-# keyring 4's default "v1" feature keeps the v1 API and pulls the platform-native
-# store (Keychain on macOS). Secrets never touch profiles.toml.
-keyring = "4.1"
 directories = "6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

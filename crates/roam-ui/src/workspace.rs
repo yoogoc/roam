@@ -1,20 +1,19 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, AppContext, ClickEvent, Context, Entity, InteractiveElement, IntoElement,
+    AnyElement, AppContext, ClickEvent, Context, Entity, InteractiveElement, IntoElement,
     ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window, div,
     prelude::FluentBuilder, px,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::dialog::DialogButtonProps;
-use gpui_component::input::{Input, InputState};
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName, Root, Sizable, Theme, ThemeMode, WindowExt, h_flex,
     v_flex,
 };
 use roam_core::transfer::DEFAULT_CONCURRENCY;
-use roam_core::{Error, Profile, ProfileId, ProfileStore, Rt, SecretStore, TransferEngine, Vfs};
+use roam_core::{Error, Profile, ProfileId, ProfileStore, Rt, TransferEngine, Vfs};
 
 use crate::actions::{CloseTab, NewTab, NextTab, PrevTab, WORKSPACE_CONTEXT};
 use crate::browser::Browser;
@@ -41,7 +40,6 @@ struct BrowserTab {
 pub struct Workspace {
     rt: Rt,
     store: Arc<ProfileStore>,
-    secrets: Arc<dyn SecretStore>,
     profiles: Vec<Profile>,
     /// The built-in local session, kept so switching back to it does not depend
     /// on whatever session a browser currently holds.
@@ -58,7 +56,7 @@ pub struct Workspace {
     /// One engine for the whole app: transfers outlive the pane that started
     /// them and can span two sessions.
     transfers: Entity<TransferPanel>,
-    form: Option<Arc<ConnectionForm>>,
+    form: Option<Entity<ConnectionForm>>,
     error: Option<Error>,
     shortcuts_open: bool,
 }
@@ -67,7 +65,6 @@ impl Workspace {
     pub fn new(
         rt: Rt,
         store: Arc<ProfileStore>,
-        secrets: Arc<dyn SecretStore>,
         local: Vfs,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -100,7 +97,6 @@ impl Workspace {
         let mut this = Self {
             rt,
             store,
-            secrets,
             profiles,
             local: local.clone(),
             engine,
@@ -266,7 +262,7 @@ impl Workspace {
             return;
         };
 
-        match Vfs::from_profile(self.rt.clone(), &profile, self.secrets.as_ref()) {
+        match Vfs::from_profile(self.rt.clone(), &profile) {
             Ok(vfs) => {
                 self.error = None;
 
@@ -313,8 +309,24 @@ impl Workspace {
         self.open_form(None, window, cx);
     }
 
+    /// Opens the dialog with a service already chosen. Only the example uses
+    /// this, to bring up the tallest form — the one whose height forced the field
+    /// list to scroll.
+    pub fn open_new_connection_for(
+        &mut self,
+        scheme: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_form(None, window, cx);
+        if let Some(form) = self.form.clone() {
+            let scheme = scheme.to_string();
+            form.update(cx, |form, cx| form.select_service(&scheme, window, cx));
+        }
+    }
+
     fn open_form(&mut self, editing: Option<Profile>, window: &mut Window, cx: &mut Context<Self>) {
-        let form = Arc::new(match &editing {
+        let form = cx.new(|cx| match &editing {
             Some(profile) => ConnectionForm::editing(profile, window, cx),
             None => ConnectionForm::new(window, cx),
         });
@@ -327,7 +339,7 @@ impl Workspace {
 
         let this = cx.weak_entity();
 
-        window.open_dialog(cx, move |dialog, _window, cx| {
+        window.open_dialog(cx, move |dialog, _window, _cx| {
             let form = form.clone();
             let this = this.clone();
 
@@ -339,7 +351,7 @@ impl Workspace {
                         .ok_text("保存")
                         .cancel_text("取消"),
                 )
-                .child(render_form(&form, cx))
+                .child(form.clone())
                 .on_ok(move |_, window, cx| {
                     this.update(cx, |workspace, cx| workspace.save_form(window, cx))
                         .unwrap_or(false)
@@ -353,14 +365,9 @@ impl Workspace {
             return true;
         };
 
-        let existing = form
-            .editing
-            .as_ref()
-            .and_then(|id| self.profiles.iter().find(|p| &p.id == id))
-            .cloned();
-
-        let draft = match form.build(existing.as_ref(), &self.taken_ids(), cx) {
-            Ok(draft) => draft,
+        let taken = self.taken_ids();
+        let profile = match form.read(cx).build(&taken, cx) {
+            Ok(profile) => profile,
             Err(err) => {
                 // Keep the dialog open so the input is not lost.
                 window.push_notification(err.user_message(), cx);
@@ -368,19 +375,10 @@ impl Workspace {
             }
         };
 
-        // Credentials go to the keychain first: if that fails we have not yet
-        // written a profile that references secrets which do not exist.
-        for (key, value) in &draft.credentials {
-            if let Err(err) = self.secrets.set(&draft.profile.id, key, value) {
-                window.push_notification(err.user_message(), cx);
-                return false;
-            }
-        }
-
         let mut profiles = self.profiles.clone();
-        match profiles.iter_mut().find(|p| p.id == draft.profile.id) {
-            Some(slot) => *slot = draft.profile.clone(),
-            None => profiles.push(draft.profile.clone()),
+        match profiles.iter_mut().find(|p| p.id == profile.id) {
+            Some(slot) => *slot = profile.clone(),
+            None => profiles.push(profile.clone()),
         }
 
         if let Err(err) = self.store.save(&profiles) {
@@ -392,15 +390,15 @@ impl Workspace {
         self.form = None;
         window.push_notification("连接已保存", cx);
 
-        let id = draft.profile.id.clone();
+        let id = profile.id.clone();
         self.connect(id, window, cx);
         true
     }
 
     fn remove_profile(&mut self, id: ProfileId, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(profile) = self.profiles.iter().find(|p| p.id == id).cloned() else {
+        if !self.profiles.iter().any(|p| p.id == id) {
             return;
-        };
+        }
 
         let remaining: Vec<Profile> = self
             .profiles
@@ -414,14 +412,8 @@ impl Workspace {
             return;
         }
 
-        // Leaving credentials behind would resurrect them if the same id were
-        // ever reused.
-        for key in &profile.secrets {
-            if let Err(err) = self.secrets.delete(&id, key) {
-                tracing::warn!(error = %err.user_message(), key, "failed to remove credential");
-            }
-        }
-
+        // Nothing to clean up outside this file any more: the credentials went
+        // out with the profile when it was dropped from `remaining`.
         self.profiles = remaining;
         // Any tab still pointing at the deleted profile falls back to local.
         if self
@@ -772,50 +764,6 @@ impl Workspace {
     }
 }
 
-fn render_form(form: &ConnectionForm, cx: &App) -> impl IntoElement + use<> {
-    v_flex()
-        .gap_3()
-        .child(field("名称", &form.name, None, cx))
-        .child(field(
-            "URI",
-            &form.uri,
-            Some("s3:// · gcs:// · azblob:// · webdav:// · fs://"),
-            cx,
-        ))
-        .child(field(
-            "选项",
-            &form.options,
-            Some("每行一个 key = value，例如 region、endpoint、root"),
-            cx,
-        ))
-        .child(field(
-            "凭据",
-            &form.credentials,
-            Some("每行一个 key = value；只写入系统钥匙串，不会存进配置文件。留空表示沿用已保存的凭据"),
-            cx,
-        ))
-}
-
-fn field(
-    label: &'static str,
-    state: &Entity<InputState>,
-    hint: Option<&'static str>,
-    cx: &App,
-) -> impl IntoElement + use<> {
-    v_flex()
-        .gap_1()
-        .child(div().text_sm().child(label))
-        .child(Input::new(state))
-        .when_some(hint, |el, hint| {
-            el.child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(hint),
-            )
-        })
-}
-
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let title = match self.active_profile() {
@@ -880,7 +828,6 @@ impl Render for Workspace {
 pub(crate) mod tests {
     use super::*;
     use gpui::{TestAppContext, VisualTestContext};
-    use roam_core::MemorySecrets;
     use std::cell::RefCell;
     use std::path::PathBuf;
     use std::rc::Rc;
@@ -892,7 +839,6 @@ pub(crate) mod tests {
         _config_dir: tempfile::TempDir,
         remote_root: PathBuf,
         config_path: PathBuf,
-        secrets: Arc<MemorySecrets>,
         workspace: Entity<Workspace>,
         cx: VisualTestContext,
     }
@@ -915,9 +861,6 @@ pub(crate) mod tests {
             let rt = Rt::new().unwrap();
             let local = Vfs::local(rt.clone(), local_dir.path().to_str().unwrap()).unwrap();
             let store = Arc::new(ProfileStore::at(&config_path));
-            let secrets = Arc::new(MemorySecrets::new());
-
-            let secrets_dyn: Arc<dyn SecretStore> = secrets.clone();
 
             // The window root must be a `gpui_component::Root`, exactly as in
             // main.rs: `window.push_notification` and the dialog layer both
@@ -927,8 +870,7 @@ pub(crate) mod tests {
             let window = {
                 let holder = holder.clone();
                 cx.add_window(move |window, cx| {
-                    let workspace =
-                        cx.new(|cx| Workspace::new(rt, store, secrets_dyn, local, window, cx));
+                    let workspace = cx.new(|cx| Workspace::new(rt, store, local, window, cx));
                     *holder.borrow_mut() = Some(workspace.clone());
                     Root::new(gpui::AnyView::from(workspace), window, cx)
                 })
@@ -942,7 +884,6 @@ pub(crate) mod tests {
                 _remote_dir: remote_dir,
                 _config_dir: config_dir,
                 config_path,
-                secrets,
                 workspace,
                 cx: visual,
             };
@@ -989,10 +930,6 @@ pub(crate) mod tests {
             self.workspace.update(&mut self.cx, |w, _| {
                 w.profiles.push(profile);
             });
-        }
-
-        pub(crate) fn store_secret(&mut self, profile: &str, key: &str, value: &str) {
-            self.secrets.set(profile, key, value).unwrap();
         }
 
         pub(crate) fn error_message(&mut self) -> Option<String> {
@@ -1147,13 +1084,12 @@ pub(crate) mod tests {
                 .read_with(&self.cx, |w, _| w.active_tab().profile.clone())
         }
 
-        pub(crate) fn add_remote_profile(&mut self, secrets: Vec<String>) -> Profile {
+        pub(crate) fn add_remote_profile(&mut self) -> Profile {
             let mut profile = Profile::new("remote", "远端", "fs:///");
             profile.options.insert(
                 "root".into(),
                 self.remote_root.to_str().unwrap().to_string(),
             );
-            profile.secrets = secrets;
 
             self.workspace.update(&mut self.cx, |w, _| {
                 w.profiles.push(profile.clone());
@@ -1191,7 +1127,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn connecting_a_profile_switches_the_backend(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
-        h.add_remote_profile(vec![]);
+        h.add_remote_profile();
 
         h.connect("remote");
 
@@ -1214,7 +1150,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn switching_sessions_does_not_leak_the_previous_listing(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
-        h.add_remote_profile(vec![]);
+        h.add_remote_profile();
 
         h.connect("remote");
         assert_eq!(h.rows(), vec!["remote-only.txt"]);
@@ -1229,11 +1165,13 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
-    fn a_missing_credential_blocks_the_switch(cx: &mut TestAppContext) {
+    fn a_profile_missing_a_required_field_blocks_the_switch(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
-        h.add_remote_profile(vec!["secret_access_key".into()]);
+        // An S3 profile with no keys. The schema knows it cannot connect, so this
+        // has to fail before the session changes rather than as a 403 later.
+        h.add_profile(Profile::new("half", "半个连接", "s3://bucket/"));
 
-        h.connect("remote");
+        h.connect("half");
 
         assert_eq!(h.active(), None, "the session must not change");
         assert_eq!(h.rows(), vec!["local-only.txt"], "still showing local");
@@ -1242,14 +1180,18 @@ pub(crate) mod tests {
             .workspace
             .read_with(&h.cx, |w, _| w.error.clone())
             .expect("an error should be reported");
-        assert!(err.user_message().contains("secret_access_key"));
+        assert!(
+            err.user_message().contains("Access Key ID"),
+            "got {}",
+            err.user_message()
+        );
     }
 
     #[gpui::test]
     fn history_is_cleared_when_the_session_changes(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         std::fs::create_dir(h.remote_root.join("sub")).unwrap();
-        h.add_remote_profile(vec![]);
+        h.add_remote_profile();
 
         h.connect("remote");
         h.workspace.update(&mut h.cx, |w, cx| {
@@ -1270,71 +1212,80 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
-    fn saving_a_form_writes_the_profile_and_keeps_the_secret_out_of_it(cx: &mut TestAppContext) {
+    fn saving_a_form_writes_the_profile_with_its_credential(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         let root = h.remote_root.to_str().unwrap().to_string();
 
         let workspace = h.workspace.clone();
         h.cx.update(|window, cx| {
-            let form = ConnectionForm::new(window, cx);
-            form.name
-                .update(cx, |s, cx| s.set_value("远端", window, cx));
-            form.uri
-                .update(cx, |s, cx| s.set_value("fs:///", window, cx));
-            form.options.update(cx, |s, cx| {
-                s.set_value(format!("root = {root}"), window, cx)
-            });
-            form.credentials.update(cx, |s, cx| {
-                s.set_value("secret_access_key = TOP-SECRET", window, cx)
+            let form = cx.new(|cx| ConnectionForm::new(window, cx));
+            form.update(cx, |form, cx| {
+                form.set_name("远端", window, cx);
+                // fs is the first service, so it is what a fresh form shows.
+                form.set_field("root", &root, window, cx);
             });
 
             workspace.update(cx, |w, cx| {
-                w.form = Some(Arc::new(form));
+                w.form = Some(form);
                 assert!(w.save_form(window, cx), "the dialog should close");
             });
         });
         h.settle();
 
         let text = std::fs::read_to_string(&h.config_path).unwrap();
-        assert!(!text.contains("TOP-SECRET"), "secret leaked into {text}");
+        assert!(text.contains(&root), "the directory is recorded");
         assert!(
-            text.contains("secret_access_key"),
-            "the key name is recorded"
-        );
-        assert!(text.contains(&root), "the non-secret option is recorded");
-
-        assert_eq!(
-            h.secrets.get("yuan-duan", "secret_access_key").unwrap(),
-            None,
-            "the id is slugified from ascii only"
-        );
-        // The generated id falls back to "connection" for a non-ascii name.
-        assert_eq!(
-            h.secrets
-                .get("connection", "secret_access_key")
-                .unwrap()
-                .as_deref(),
-            Some("TOP-SECRET"),
-            "the credential went to the secret store"
+            text.contains("fs://"),
+            "the URI is composed from the form: {text}"
         );
     }
 
     #[gpui::test]
-    fn a_credential_typed_into_options_is_refused(cx: &mut TestAppContext) {
+    fn a_credential_is_saved_into_the_config_file(cx: &mut TestAppContext) {
+        // The inverse of what this file used to assert. Worth an explicit test
+        // rather than an absence: the credential really is on disk now, and a
+        // reader of these tests should not have to infer that.
         let mut h = Harness::new(cx);
 
         let workspace = h.workspace.clone();
         h.cx.update(|window, cx| {
-            let form = ConnectionForm::new(window, cx);
-            form.name.update(cx, |s, cx| s.set_value("S3", window, cx));
-            form.uri
-                .update(cx, |s, cx| s.set_value("s3://bucket", window, cx));
-            form.options.update(cx, |s, cx| {
-                s.set_value("secret_access_key = oops", window, cx)
+            let form = cx.new(|cx| ConnectionForm::new(window, cx));
+            form.update(cx, |form, cx| {
+                form.choose_scheme("s3", window, cx);
+                form.set_name("S3", window, cx);
+                form.set_field("bucket", "my-bucket", window, cx);
+                form.set_field("access_key_id", "AKIAEXAMPLE", window, cx);
+                form.set_field("secret_access_key", "TOP-SECRET", window, cx);
             });
 
             workspace.update(cx, |w, cx| {
-                w.form = Some(Arc::new(form));
+                w.form = Some(form);
+                assert!(w.save_form(window, cx), "the dialog should close");
+            });
+        });
+        h.settle();
+
+        let text = std::fs::read_to_string(&h.config_path).unwrap();
+        assert!(text.contains("TOP-SECRET"), "the credential is stored here");
+        assert!(text.contains("s3://my-bucket/"), "got: {text}");
+    }
+
+    #[gpui::test]
+    fn a_missing_required_field_keeps_the_dialog_open(cx: &mut TestAppContext) {
+        let mut h = Harness::new(cx);
+
+        let workspace = h.workspace.clone();
+        h.cx.update(|window, cx| {
+            let form = cx.new(|cx| ConnectionForm::new(window, cx));
+            form.update(cx, |form, cx| {
+                form.choose_scheme("s3", window, cx);
+                form.set_name("S3", window, cx);
+                form.set_field("bucket", "bucket", window, cx);
+                // No keys typed: the schema says S3 cannot connect without them.
+            });
+
+            workspace.update(cx, |w, cx| {
+                w.form = Some(form);
                 assert!(
                     !w.save_form(window, cx),
                     "the dialog stays open so the input is not lost"
@@ -1346,6 +1297,72 @@ pub(crate) mod tests {
             !h.config_path.exists(),
             "nothing is written when validation fails"
         );
+    }
+
+    #[gpui::test]
+    fn switching_service_keeps_the_fields_both_share(cx: &mut TestAppContext) {
+        let mut h = Harness::new(cx);
+
+        h.cx.update(|window, cx| {
+            let form = cx.new(|cx| ConnectionForm::new(window, cx));
+            form.update(cx, |form, cx| {
+                form.choose_scheme("s3", window, cx);
+                form.set_field("bucket", "shared", window, cx);
+                form.set_field("endpoint", "http://127.0.0.1:9000", window, cx);
+                form.set_field("access_key_id", "k", window, cx);
+                form.set_field("secret_access_key", "s", window, cx);
+
+                form.set_name("GCS", window, cx);
+                form.choose_scheme("gcs", window, cx);
+                assert_eq!(form.scheme(), "gcs");
+
+                // gcs has bucket and endpoint too, so retyping them would be
+                // the exact tedium this form removes.
+                let err = form
+                    .build(&[], cx)
+                    .expect_err("gcs still needs its own token");
+                assert!(
+                    err.user_message().contains("访问令牌"),
+                    "got {}",
+                    err.user_message()
+                );
+
+                form.set_field("token", "t", window, cx);
+                let profile = form.build(&[], cx).unwrap();
+                assert_eq!(profile.uri, "gcs://shared/");
+                assert_eq!(
+                    profile.options.get("endpoint").unwrap(),
+                    "http://127.0.0.1:9000"
+                );
+                // And the S3-only key did not follow it over.
+                assert!(!profile.options.contains_key("secret_access_key"));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn editing_shows_the_stored_values_including_the_credential(cx: &mut TestAppContext) {
+        let mut h = Harness::new(cx);
+
+        let mut profile = Profile::new("p", "MinIO", "s3://bucket/data");
+        profile.options.insert("region".into(), "us-east-1".into());
+        profile
+            .options
+            .insert("access_key_id".into(), "AKIA".into());
+        profile
+            .options
+            .insert("secret_access_key".into(), "shhh".into());
+
+        h.cx.update(|window, cx| {
+            let form = cx.new(|cx| ConnectionForm::editing(&profile, window, cx));
+            form.update(cx, |form, cx| {
+                assert_eq!(form.scheme(), "s3");
+                // Editing must not blank the credential — "change the region"
+                // would otherwise delete the password.
+                let rebuilt = form.build(&[], cx).unwrap();
+                assert_eq!(rebuilt, profile);
+            });
+        });
     }
 }
 
@@ -1427,7 +1444,7 @@ mod tree_tests {
         h.settle_tree();
         assert_eq!(h.tree_labels(), vec!["/", "  alpha"]);
 
-        h.add_remote_profile(vec![]);
+        h.add_remote_profile();
         h.connect("remote");
         h.settle_tree();
 
@@ -1486,7 +1503,7 @@ mod tab_tests {
     #[gpui::test]
     fn tabs_can_sit_on_different_backends(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
-        h.add_remote_profile(vec![]);
+        h.add_remote_profile();
 
         // The whole point of independent tabs: local in one, remote in another.
         h.new_tab();
@@ -1503,7 +1520,7 @@ mod tab_tests {
     #[gpui::test]
     fn connecting_only_changes_the_active_tab(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
-        h.add_remote_profile(vec![]);
+        h.add_remote_profile();
         h.new_tab();
 
         h.connect("remote");
@@ -1568,7 +1585,7 @@ mod tab_tests {
     #[gpui::test]
     fn deleting_a_profile_falls_every_tab_back_to_local(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
-        h.add_remote_profile(vec![]);
+        h.add_remote_profile();
         h.connect("remote");
         h.new_tab();
         assert_eq!(h.active(), Some("remote".to_string()));
@@ -1600,7 +1617,14 @@ mod s3_tests {
         profile
             .options
             .insert("enable_virtual_host_style".into(), "false".into());
-        profile.secrets = vec!["access_key_id".into(), "secret_access_key".into()];
+        profile.options.insert(
+            "access_key_id".into(),
+            std::env::var("ROAM_S3_KEY").unwrap_or_else(|_| "roamtest".into()),
+        );
+        profile.options.insert(
+            "secret_access_key".into(),
+            std::env::var("ROAM_S3_SECRET").unwrap_or_else(|_| "roamtest-secret".into()),
+        );
         Some(profile)
     }
 
@@ -1612,18 +1636,8 @@ mod s3_tests {
         };
 
         let mut h = Harness::new(cx);
+        // The credentials ride in the profile itself now.
         h.add_profile(profile);
-        h.store_secret(
-            "minio",
-            "access_key_id",
-            &std::env::var("ROAM_S3_KEY").unwrap_or_else(|_| "roamtest".into()),
-        );
-        h.store_secret(
-            "minio",
-            "secret_access_key",
-            &std::env::var("ROAM_S3_SECRET").unwrap_or_else(|_| "roamtest-secret".into()),
-        );
-
         h.connect("minio");
 
         assert_eq!(h.active().as_deref(), Some("minio"));
@@ -1644,11 +1658,16 @@ mod s3_tests {
             return;
         };
 
+        let mut profile = profile;
+        profile
+            .options
+            .insert("access_key_id".into(), "wrong".into());
+        profile
+            .options
+            .insert("secret_access_key".into(), "alsowrong".into());
+
         let mut h = Harness::new(cx);
         h.add_profile(profile);
-        h.store_secret("minio", "access_key_id", "wrong");
-        h.store_secret("minio", "secret_access_key", "alsowrong");
-
         h.connect("minio");
 
         // The session still switches — the credentials are only rejected once a

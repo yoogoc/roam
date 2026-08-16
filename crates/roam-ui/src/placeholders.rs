@@ -22,9 +22,12 @@
 //! belongs in a field's hint text, not its placeholder.
 
 pub const CONNECTION_NAME: &str = "Prod S3";
-pub const CONNECTION_URI: &str = "s3://bucket/prefix";
-pub const CONNECTION_OPTIONS: &str = "region = ap-northeast-1";
-pub const CONNECTION_CREDENTIALS: &str = "access_key_id = AKIA…";
+
+/// Shown under the connection form. Not a placeholder, but it lives here for the
+/// same reason: it is user-facing text with the same single-line rule, and the
+/// test below covers it.
+pub const CREDENTIAL_STORAGE_NOTE: &str =
+    "凭据与其他选项一起保存在本机配置文件中（仅本人可读），不写入系统钥匙串。";
 pub const NEW_FOLDER: &str = "新文件夹";
 pub const RENAME: &str = "新名称";
 pub const FILTER: &str = "过滤当前目录";
@@ -32,9 +35,7 @@ pub const FILTER: &str = "过滤当前目录";
 /// Used by the test below. Add every new placeholder here.
 pub const ALL: &[&str] = &[
     CONNECTION_NAME,
-    CONNECTION_URI,
-    CONNECTION_OPTIONS,
-    CONNECTION_CREDENTIALS,
+    CREDENTIAL_STORAGE_NOTE,
     NEW_FOLDER,
     RENAME,
     FILTER,

@@ -20,7 +20,7 @@
 use std::sync::Arc;
 
 use roam_core::transfer::{CHUNK, TaskProgress};
-use roam_core::{EntryKind, MemorySecrets, Profile, Rt, SecretStore, Vfs};
+use roam_core::{EntryKind, Profile, Rt, Vfs};
 
 /// Build a session, or `None` when the backend's endpoint is not configured.
 fn session(
@@ -38,13 +38,13 @@ fn session(
         profile.options.insert((*key).into(), value.clone());
     }
 
-    let store = MemorySecrets::new();
+    // Credentials are ordinary options now; the parameter stays separate only
+    // so each backend's call site still reads as "config, then secrets".
     for (key, value) in secrets {
-        profile.secrets.push((*key).to_string());
-        store.set(id, key, value).unwrap();
+        profile.options.insert((*key).into(), value.clone());
     }
 
-    Some(Vfs::from_profile(Rt::from_current().unwrap(), &profile, &store).unwrap())
+    Some(Vfs::from_profile(Rt::from_current().unwrap(), &profile).unwrap())
 }
 
 fn env(key: &str, fallback: &str) -> String {
