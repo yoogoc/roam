@@ -19,3 +19,70 @@ tokio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+# ── packaging ─────────────────────────────────────────────────────────────
+#
+# `cargo packager --release` produces the .app and .dmg (and, on the other
+# platforms, .deb/.AppImage/.msi). See docs/PACKAGING.md for why the app is signed
+# with the hardened runtime and *not* sandboxed — cargo-packager already passes
+# `--options runtime` for native binaries, and only passes `--entitlements` when
+# one is configured, so leaving `entitlements` unset is what keeps App Sandbox off.
+[package.metadata.packager]
+product-name = "Roam"
+# Must stay in step with `ProjectDirs::from("dev", "roam", "Roam")` in roam-core,
+# which decides where profiles.toml lives. Changing it orphans existing configs.
+identifier = "dev.roam.Roam"
+description = "Cross-backend file browser"
+long-description = """
+Browse local disk, S3, Google Cloud Storage, Azure Blob Storage, WebDAV and SFTP
+in one window, with transfers between them.
+"""
+homepage = "https://github.com/yoogoc/roam"
+authors = ["yoogo"]
+category = "Utility"
+
+# cargo-packager packages a binary, it never builds one — so the build has to be
+# named here. Host architecture only: a universal binary would mean building the
+# whole tree twice and `lipo`-ing the result, which is not worth it for a tool that
+# is built where it runs.
+before-packaging-command = "cargo build --release -p roam"
+binaries = [{ path = "roam", main = true }]
+
+# The packager picks what each platform needs out of this list: .icns for macOS,
+# .ico for Windows, the PNGs for Linux's hicolor theme.
+icons = [
+    "../../assets/app-icon/roam.icns",
+    "../../assets/app-icon/roam.ico",
+    "../../assets/app-icon/icon-16.png",
+    "../../assets/app-icon/icon-32.png",
+    "../../assets/app-icon/icon-64.png",
+    "../../assets/app-icon/icon-128.png",
+    "../../assets/app-icon/icon-256.png",
+    "../../assets/app-icon/icon-512.png",
+    "../../assets/app-icon/icon-1024.png",
+]
+
+[package.metadata.packager.macos]
+minimum-system-version = "11.0"
+
+# Uncomment once a Developer ID Application certificate exists. The identity
+# *string* is not a secret — it is readable in every signed binary — so it belongs
+# in the repo; the private key never does. Without it the bundle is left unsigned,
+# which runs locally and nowhere else.
+#
+# cargo-packager always passes `--options runtime` for a native binary, and only
+# passes `--entitlements` when one is configured. So this single line is the whole
+# signing setup, and leaving `entitlements` unset is what keeps App Sandbox off —
+# which matters, because turning it on breaks sftp (docs/PACKAGING.md).
+# signing-identity = "Developer ID Application: NAME (TEAMID)"
+
+# Notarization is credential-driven, not config-driven: cargo-packager notarizes
+# when it finds APPLE_ID + APPLE_PASSWORD + APPLE_TEAM_ID, or APPLE_API_KEY +
+# APPLE_API_ISSUER + APPLE_API_KEY_PATH, or APPLE_KEYCHAIN_PROFILE. Absent those it
+# logs a warning and carries on rather than failing.
+
+[package.metadata.packager.dmg]
+# The classic drag-to-install window.
+window-size = { width = 660, height = 400 }
+app-position = { x = 180, y = 170 }
+application-folder-position = { x = 480, y = 170 }

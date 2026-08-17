@@ -141,6 +141,25 @@ all have to be created through an API rather than by writing to a mounted path.
 act -j core -P ubuntu-latest=catthehacker/ubuntu:act-latest
 ```
 
+## Packaging
+
+```
+cargo install cargo-packager --locked
+cargo packager -p roam --release --formats app,dmg
+```
+
+One config in `crates/roam/Cargo.toml` covers every platform's formats — `.app` and
+`.dmg`, `.deb` and `.AppImage`, `.msi` and the NSIS installer.
+
+The app is signed with the hardened runtime and **not** sandboxed, which is not a
+preference: the sftp backend spawns the system `ssh`, and App Sandbox forbids that.
+Measured rather than assumed — with the sandbox entitlement the same bundle fails
+with `Operation not permitted`, without it the same test passes. So the Mac App
+Store is not a channel for this app while sftp exists. `docs/PACKAGING.md` has the
+rest: what notarization needs, the two environment traps (a SOCKS proxy breaks the
+DMG step; there is no LICENSE file yet), and what stands between here and Linux or
+Windows.
+
 ## What is not verified
 
 - **The real cloud services.** MinIO, Azurite, fake-gcs-server and Apache are
@@ -150,6 +169,10 @@ act -j core -P ubuntu-latest=catthehacker/ubuntu:act-latest
   endpoint, which `fake-gcs-server` answers with 404.
 - **Screenshots.** `screencapture` is blocked on the development machine, so the
   UI is verified by running it, not by looking at it.
+- **Notarization and Gatekeeper.** Packaging is verified up to a working, ad-hoc
+  signed `Roam.app` and `.dmg` that launch. Notarizing needs a Developer ID
+  Application certificate, which this machine does not have — so "double-clicks on
+  someone else's Mac" is untested.
 - **GitHub's own runners.** The `core` job ran under `act` on arm64 Linux
   containers, not on a hosted x86_64 `ubuntu-latest`, and `rust-cache` no-ops
   locally. The `ui` job cannot be checked this way at all: `act` has no macOS
