@@ -505,6 +505,12 @@ async fn webdav_capabilities_are_read_from_the_server() {
 //   profile stores a *path* here rather than a secret.
 
 fn sftp(prefix: &str) -> Option<Vfs> {
+    // Windows has no sftp backend compiled in at all, so there is nothing here to
+    // test even if a server is configured — skip rather than fail.
+    if cfg!(windows) {
+        return None;
+    }
+
     // The file, not just the variable: `up` exports every backend's environment
     // even when only one server was started, so checking the variable alone turns
     // "not configured" into a failure instead of a skip.
@@ -653,6 +659,10 @@ async fn sftp_capabilities_are_read_from_the_server() {
 // that two string transforms agree.
 
 fn sftp_password(prefix: &str) -> Option<Vfs> {
+    if cfg!(windows) {
+        return None;
+    }
+
     let endpoint = std::env::var("ROAM_SFTP_PW_ENDPOINT").ok()?;
     let user = env("ROAM_SFTP_PW_USER", "pwuser");
     let password = env("ROAM_SFTP_PW_PASSWORD", "pwsecret");
@@ -693,7 +703,7 @@ async fn sftp_authenticates_with_a_password() {
 
 #[tokio::test]
 async fn a_wrong_sftp_password_is_refused() {
-    if std::env::var("ROAM_SFTP_PW_ENDPOINT").is_err() {
+    if cfg!(windows) || std::env::var("ROAM_SFTP_PW_ENDPOINT").is_err() {
         eprintln!("skipping: ROAM_SFTP_PW_ENDPOINT is not set");
         return;
     }

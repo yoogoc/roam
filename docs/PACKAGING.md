@@ -179,9 +179,12 @@ AppImage 的工具链在两个架构下都齐：`AppRun-{x86_64,aarch64}`、
 
 **Windows** — 有真实的功能损失：
 
-- sftp 的**密码认证不成立**。那套机制是 POSIX `sh` 写的 askpass + shim
-  （`#!/bin/sh`），Windows 的 OpenSSH 没有 askpass 这套东西。密钥认证或许可行
-  （Win10+ 自带 `ssh.exe`），要另外验。
+- **整个 sftp 后端没有。** 不是密码认证的问题：`opendal-service-sftp` 依赖的
+  `openssh` crate 是 Unix-only 的，在 Windows 上连编译都不过。所以 `services-sftp`
+  改成按 target 开启（见 `crates/roam-core/Cargo.toml`），Windows 构建里不含这个
+  服务，连接表单也不列它。之前这里写的是「密码认证不成立」（askpass + shim 是
+  POSIX `sh` 写的，Windows OpenSSH 没有 askpass 这一套）—— 那条仍然对，只是现在
+  连密钥认证也谈不上了。
 - 文件权限那几处是 `#[cfg(unix)]`：`profiles.toml` 的 `0600` 和助手脚本的 `0700` 在
   Windows 上都不生效。而这个文件**装着明文凭据** —— Windows 上得换成 ACL，否则那句
   "仅本人可读"就是假的。

@@ -11,6 +11,7 @@ use tokio::task::JoinHandle;
 
 use crate::menu::{self, MenuItem};
 use crate::profile::Profile;
+#[cfg(not(windows))]
 use crate::sftp_auth;
 use crate::transfer::{CHUNK, TaskProgress, WRITER_CONCURRENCY};
 use crate::{DirEntry, Error, ObjectVersion, Result, Rt, path};
@@ -123,11 +124,25 @@ impl Vfs {
 
     /// Build a session from a saved profile.
     pub fn from_profile(rt: Rt, profile: &Profile) -> Result<Self> {
+        // Only the sftp branch below mutates it, and that branch is Unix-only.
+        #[cfg_attr(windows, allow(unused_mut))]
         let mut options = profile.connect_options()?;
+
+        // A profile written on another platform, or carried over in a synced
+        // config. OpenDAL would refuse the URI anyway, but with "unsupported
+        // scheme" rather than the reason — and the reason is not something the
+        // user can fix.
+        #[cfg(windows)]
+        if profile.scheme() == "sftp" {
+            return Err(Error::Unsupported(
+                "Windows 版不支持 SFTP：该后端要调用系统 ssh，依赖的库只在 Unix 上可用".into(),
+            ));
+        }
 
         // sftp passwords do not go to OpenDAL — it has no option for one, and
         // handing it a key it does not know is not something to rely on. They go
         // to `ssh` instead, through the helper described in `sftp_auth`.
+        #[cfg(not(windows))]
         if profile.scheme() == "sftp"
             && let Some(ix) = options.iter().position(|(key, _)| key == "password")
         {

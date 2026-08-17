@@ -11,8 +11,10 @@ license = "MIT"
 roam-core = { path = "crates/roam-core" }
 roam-ui = { path = "crates/roam-ui" }
 
-# `services-sftp` shells out to the system `ssh`/`sftp` binaries at runtime via
-# the `openssh` crate — it is not a pure-Rust client. See §14 for what that costs.
+# `services-sftp` is *not* listed here: it shells out to the system `ssh`/`sftp`
+# binaries via the `openssh` crate, which is Unix-only and does not build for
+# Windows at all. It is enabled per-target in `crates/roam-core/Cargo.toml`
+# instead. See §14 for what that backend costs everywhere else.
 opendal = { version = "0.58.1", default-features = false, features = [
     "auto-register-services",
     "executors-tokio",
@@ -22,7 +24,6 @@ opendal = { version = "0.58.1", default-features = false, features = [
     "services-gcs",
     "services-azblob",
     "services-webdav",
-    "services-sftp",
     "layers-retry",
     "layers-timeout",
     "layers-concurrent-limit",

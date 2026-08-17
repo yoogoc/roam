@@ -1,7 +1,7 @@
 # Roam
 
 A cross-backend desktop file browser. Local disk, S3, GCS, Azure Blob, WebDAV and
-SFTP through one window, built on [OpenDAL] and [GPUI].
+SFTP (macOS and Linux) through one window, built on [OpenDAL] and [GPUI].
 
 ```
 cargo run                 # browse $HOME
@@ -16,7 +16,8 @@ commit, or paste into an issue, and anyone who can read it has the credentials.
 
 Connections are entered through a form generated per backend: pick S3, GCS, Azure
 Blob, WebDAV, SFTP or local disk and it asks for that service's fields, masks the
-secret ones, and composes the OpenDAL URI itself.
+secret ones, and composes the OpenDAL URI itself. The picker lists what the build
+actually has, so SFTP is absent on Windows.
 
 ## Layout
 
@@ -179,9 +180,11 @@ Windows.
   image, and substituting Linux would pass gpui tests that could never run there.
   Its commands are run directly on macOS instead — the same OS as the runner.
 
-`sftp` is enabled but stands apart from the rest: it drives the system `ssh`
-binary, so it needs one in `PATH` and its key must be a file on disk rather than a
-keychain entry.
+`sftp` stands apart from the rest: it drives the system `ssh` binary, so it needs
+one in `PATH` and its key must be a file on disk rather than a keychain entry.
+That also makes it **macOS and Linux only** — the `openssh` crate underneath it
+does not build for Windows, so a Windows build leaves the backend out entirely and
+the connection form does not offer it.
 
 [OpenDAL]: https://opendal.apache.org
 [GPUI]: https://gpui.rs

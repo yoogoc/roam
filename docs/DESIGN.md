@@ -400,7 +400,7 @@ keyring = "4.1"       # 不是 3.x；默认的 v1 feature 保留 v1 API 并自�
 directories = "6"
 ```
 
-`services-sftp` 已开启，但它和其他后端不是一类东西 —— 见下。
+`services-sftp` 在 macOS / Linux 上开启，Windows 上不开 —— 它和其他后端不是一类东西，见下。
 
 ---
 
@@ -716,8 +716,9 @@ WebDAV 那条集成测试因此**断言不变量而不是路径**：无论走续
 
 ### sftp：唯一不走 HTTP 的后端
 
-`opendal-service-sftp` 建立在 `openssh` crate 上，而后者**调用系统的 `ssh` 二进制**。这不是一个纯 Rust 客户端，带来三个和其他后端不同的约束：
+`opendal-service-sftp` 建立在 `openssh` crate 上，而后者**调用系统的 `ssh` 二进制**。这不是一个纯 Rust 客户端，带来四个和其他后端不同的约束：
 
+- **Windows 上根本不存在这个后端。** `openssh` 是 Unix-only 的，连编译都不过，所以 `services-sftp` 不能写在 workspace 清单里 —— 它挂在 `crates/roam-core/Cargo.toml` 的 `[target.'cfg(not(windows))'.dependencies]` 下。代码这一侧跟着走同一条 cfg：`service::SERVICES` 在 Windows 上少一项（表单因此不会给出一个连不上的选项，`for_scheme` 也就不再认识这个 scheme），`sftp_auth` 整个模块不编译，`Vfs::from_profile` 遇到 `sftp://` 直接给出「Windows 版不支持 SFTP」而不是 OpenDAL 的「unsupported scheme」—— 后者说的是现象，不是原因，而这个原因用户改不了。旧的 profile 仍然留在侧栏里（`load` 从不校验），点开时才解释自己。
 - 运行时依赖宿主机 `PATH` 里有可用的 `ssh` / `sftp`；
 - 主机密钥校验是系统的，所以连一台新服务器需要 `known_hosts_strategy` 策略（测试里用 `accept`）；
 - 认证走 ssh 的方式，**密钥必须是磁盘上的文件**，所以 profile 里存的是密钥**路径**而不是密钥内容。这原本是「凭据只进钥匙串」原则的一个例外；那条原则现在已经不在了（见 §5），所以它也不再是例外 —— 表单把它渲染成一个路径字段。

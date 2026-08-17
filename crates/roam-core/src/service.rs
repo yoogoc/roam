@@ -144,106 +144,127 @@ impl Service {
     }
 }
 
-/// Every backend the app is built with, in the order the picker shows them.
-pub static SERVICES: &[Service] = &[
-    Service {
-        scheme: "fs",
-        label: "本机磁盘",
-        // OpenDAL's fs service takes the directory from the URI itself, so this
-        // composes `fs:///path` rather than riding along as a `root` option —
-        // which also keeps a hand-written `fs:///tmp` profile valid.
-        fields: &[Field::text("root", "目录", "例如 /Users/you/Documents")
-            .path()
+// Each backend is named rather than written inline in the list, because the list
+// is not the same on every platform: see `SERVICES` below.
+
+const FS: Service = Service {
+    scheme: "fs",
+    label: "本机磁盘",
+    // OpenDAL's fs service takes the directory from the URI itself, so this
+    // composes `fs:///path` rather than riding along as a `root` option —
+    // which also keeps a hand-written `fs:///tmp` profile valid.
+    fields: &[Field::text("root", "目录", "例如 /Users/you/Documents")
+        .path()
+        .prefix()
+        .absolute()
+        .required()],
+};
+
+const S3: Service = Service {
+    scheme: "s3",
+    label: "S3 / 兼容对象存储",
+    fields: &[
+        Field::text("bucket", "Bucket", "存储桶名称")
+            .host()
+            .required(),
+        Field::text("prefix", "前缀", "可选，例如 team/reports").prefix(),
+        Field::text("endpoint", "Endpoint", "自建或兼容服务填写，AWS 可留空"),
+        // Required, unlike the credentials: OpenDAL's S3 builder fails with
+        // "region is missing" before any request, and it cannot be inferred
+        // from an IAM role the way keys can.
+        Field::text("region", "区域", "例如 us-east-1").required(),
+        Field::text(
+            "access_key_id",
+            "Access Key ID",
+            "留空则使用环境变量或 IAM 角色",
+        ),
+        Field::text(
+            "secret_access_key",
+            "Secret Access Key",
+            "留空则使用环境变量或 IAM 角色",
+        )
+        .secret(),
+        Field::text(
+            "enable_virtual_host_style",
+            "使用 virtual-host 寻址",
+            "MinIO 等兼容服务通常需要关闭",
+        )
+        .toggle("true", "false"),
+    ],
+};
+
+const GCS: Service = Service {
+    scheme: "gcs",
+    label: "Google Cloud Storage",
+    fields: &[
+        Field::text("bucket", "Bucket", "存储桶名称")
+            .host()
+            .required(),
+        Field::text("prefix", "前缀", "可选").prefix(),
+        Field::text("endpoint", "Endpoint", "使用模拟器时填写，正式环境留空"),
+        Field::text("token", "访问令牌", "OAuth2 token，留空则使用默认凭据").secret(),
+    ],
+};
+
+const AZBLOB: Service = Service {
+    scheme: "azblob",
+    label: "Azure Blob Storage",
+    fields: &[
+        Field::text("container", "容器", "container 名称")
+            .host()
+            .required(),
+        Field::text("prefix", "前缀", "可选").prefix(),
+        Field::text("account_name", "账户名", "storage account 名称").required(),
+        Field::text("account_key", "账户密钥", "留空则使用 SAS 或 AAD").secret(),
+        Field::text("endpoint", "Endpoint", "使用 Azurite 时填写，正式环境留空"),
+    ],
+};
+
+const WEBDAV: Service = Service {
+    scheme: "webdav",
+    label: "WebDAV",
+    fields: &[
+        Field::text("endpoint", "服务地址", "例如 https://dav.example.com").required(),
+        Field::text("prefix", "路径", "可选，服务地址之后的子路径").prefix(),
+        Field::text("username", "用户名", ""),
+        Field::text("password", "密码", "").secret(),
+    ],
+};
+
+#[cfg(not(windows))]
+const SFTP: Service = Service {
+    scheme: "sftp",
+    label: "SFTP",
+    fields: &[
+        Field::text("endpoint", "主机", "例如 example.com:22").required(),
+        Field::text("path", "远端路径", "例如 /upload")
             .prefix()
-            .absolute()
-            .required()],
-    },
-    Service {
-        scheme: "s3",
-        label: "S3 / 兼容对象存储",
-        fields: &[
-            Field::text("bucket", "Bucket", "存储桶名称")
-                .host()
-                .required(),
-            Field::text("prefix", "前缀", "可选，例如 team/reports").prefix(),
-            Field::text("endpoint", "Endpoint", "自建或兼容服务填写，AWS 可留空"),
-            // Required, unlike the credentials: OpenDAL's S3 builder fails with
-            // "region is missing" before any request, and it cannot be inferred
-            // from an IAM role the way keys can.
-            Field::text("region", "区域", "例如 us-east-1").required(),
-            Field::text(
-                "access_key_id",
-                "Access Key ID",
-                "留空则使用环境变量或 IAM 角色",
-            ),
-            Field::text(
-                "secret_access_key",
-                "Secret Access Key",
-                "留空则使用环境变量或 IAM 角色",
-            )
-            .secret(),
-            Field::text(
-                "enable_virtual_host_style",
-                "使用 virtual-host 寻址",
-                "MinIO 等兼容服务通常需要关闭",
-            )
-            .toggle("true", "false"),
-        ],
-    },
-    Service {
-        scheme: "gcs",
-        label: "Google Cloud Storage",
-        fields: &[
-            Field::text("bucket", "Bucket", "存储桶名称")
-                .host()
-                .required(),
-            Field::text("prefix", "前缀", "可选").prefix(),
-            Field::text("endpoint", "Endpoint", "使用模拟器时填写，正式环境留空"),
-            Field::text("token", "访问令牌", "OAuth2 token，留空则使用默认凭据").secret(),
-        ],
-    },
-    Service {
-        scheme: "azblob",
-        label: "Azure Blob Storage",
-        fields: &[
-            Field::text("container", "容器", "container 名称")
-                .host()
-                .required(),
-            Field::text("prefix", "前缀", "可选").prefix(),
-            Field::text("account_name", "账户名", "storage account 名称").required(),
-            Field::text("account_key", "账户密钥", "留空则使用 SAS 或 AAD").secret(),
-            Field::text("endpoint", "Endpoint", "使用 Azurite 时填写，正式环境留空"),
-        ],
-    },
-    Service {
-        scheme: "webdav",
-        label: "WebDAV",
-        fields: &[
-            Field::text("endpoint", "服务地址", "例如 https://dav.example.com").required(),
-            Field::text("prefix", "路径", "可选，服务地址之后的子路径").prefix(),
-            Field::text("username", "用户名", ""),
-            Field::text("password", "密码", "").secret(),
-        ],
-    },
-    Service {
-        scheme: "sftp",
-        label: "SFTP",
-        fields: &[
-            Field::text("endpoint", "主机", "例如 example.com:22").required(),
-            Field::text("path", "远端路径", "例如 /upload")
-                .prefix()
-                .absolute(),
-            Field::text("user", "用户名", "").required(),
-            Field::text("key", "私钥文件", "本机路径；留空则使用 ssh-agent").path(),
-            Field::text(
-                "known_hosts_strategy",
-                "接受未知主机密钥",
-                "关闭则使用系统 known_hosts",
-            )
-            .toggle("accept", "strict"),
-        ],
-    },
-];
+            .absolute(),
+        Field::text("user", "用户名", "").required(),
+        Field::text("key", "私钥文件", "本机路径；留空则使用 ssh-agent").path(),
+        Field::text(
+            "known_hosts_strategy",
+            "接受未知主机密钥",
+            "关闭则使用系统 known_hosts",
+        )
+        .toggle("accept", "strict"),
+    ],
+};
+
+/// Every backend the app is built with, in the order the picker shows them.
+#[cfg(not(windows))]
+pub static SERVICES: &[Service] = &[FS, S3, GCS, AZBLOB, WEBDAV, SFTP];
+
+/// Every backend the app is built with, in the order the picker shows them.
+///
+/// No sftp on Windows. OpenDAL's sftp service runs the system `ssh` through the
+/// `openssh` crate, which is Unix-only — the backend is not compiled into this
+/// build at all (see `Cargo.toml`), so offering it in the picker could only ever
+/// produce a connection that fails. `for_scheme` therefore also stops recognising
+/// the scheme here, which is what keeps the form, validation and redaction from
+/// describing a backend that does not exist.
+#[cfg(windows)]
+pub static SERVICES: &[Service] = &[FS, S3, GCS, AZBLOB, WEBDAV];
 
 pub fn for_scheme(scheme: &str) -> Option<&'static Service> {
     SERVICES.iter().find(|s| s.scheme == scheme)
@@ -488,20 +509,25 @@ mod tests {
             &values(&[("root", "/tmp")]),
         )
         .unwrap();
-        // fs has no toggle; sftp does, and an unsaved one must not read as on.
-        let sftp = build_profile(
-            "s".into(),
-            "SFTP".into(),
-            "sftp",
-            &values(&[("endpoint", "h:22"), ("user", "u"), ("key", "/tmp/k")]),
-        )
-        .unwrap();
-
         assert!(!profile.options.contains_key("known_hosts_strategy"));
-        assert_eq!(
-            field_values(&sftp).get("known_hosts_strategy").unwrap(),
-            "strict"
-        );
+
+        // fs has no toggle; sftp does, and an unsaved one must not read as on.
+        // Only where sftp exists — Windows has no such service to build.
+        #[cfg(not(windows))]
+        {
+            let sftp = build_profile(
+                "s".into(),
+                "SFTP".into(),
+                "sftp",
+                &values(&[("endpoint", "h:22"), ("user", "u"), ("key", "/tmp/k")]),
+            )
+            .unwrap();
+
+            assert_eq!(
+                field_values(&sftp).get("known_hosts_strategy").unwrap(),
+                "strict"
+            );
+        }
     }
 
     #[test]

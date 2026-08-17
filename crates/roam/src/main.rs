@@ -17,8 +17,9 @@ fn local_root() -> Result<String> {
         return Ok(arg);
     }
 
-    let home = std::env::var("HOME").context("HOME is not set")?;
-    Ok(home)
+    // Not `$HOME`: there is no such variable on Windows. See `roam_core::dirs`.
+    let home = roam_core::dirs::home().context("cannot determine the home directory")?;
+    Ok(home.to_string_lossy().into_owned())
 }
 
 /// Where connection profiles live. `ROAM_CONFIG` overrides the platform config

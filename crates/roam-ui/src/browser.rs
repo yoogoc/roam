@@ -797,7 +797,7 @@ impl Browser {
     }
 
     fn download(&mut self, entry: DirEntry, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(dest) = downloads_dir() else {
+        let Some(dest) = roam_core::dirs::downloads() else {
             window.push_notification("找不到下载目录", cx);
             return;
         };
@@ -1372,14 +1372,6 @@ fn render_versions(
                 .child(div().flex_1().child("状态")),
         )
         .children(rows)
-}
-
-/// Where downloads land. `directories` is not a dependency of this crate, so
-/// this uses the conventional location under `$HOME` directly.
-fn downloads_dir() -> Option<std::path::PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    let downloads = std::path::PathBuf::from(home).join("Downloads");
-    downloads.is_dir().then_some(downloads)
 }
 
 #[cfg(test)]
