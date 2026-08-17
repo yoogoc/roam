@@ -42,10 +42,10 @@ authors = ["yoogo"]
 category = "Utility"
 
 # cargo-packager packages a binary, it never builds one — so the build has to be
-# named here. Host architecture only: a universal binary would mean building the
-# whole tree twice and `lipo`-ing the result, which is not worth it for a tool that
-# is built where it runs.
-before-packaging-command = "cargo build --release -p roam"
+# named here. The hook runs through `sh -c`, so the expansion below is real: unset
+# locally it builds for the host, and CI sets ROAM_BUILD_TARGET to cross-compile.
+# One command that is correct in both places, rather than two that drift.
+before-packaging-command = "cargo build --release -p roam ${ROAM_BUILD_TARGET:+--target $ROAM_BUILD_TARGET}"
 binaries = [{ path = "roam", main = true }]
 
 # The packager picks what each platform needs out of this list: .icns for macOS,
@@ -80,6 +80,31 @@ minimum-system-version = "11.0"
 # when it finds APPLE_ID + APPLE_PASSWORD + APPLE_TEAM_ID, or APPLE_API_KEY +
 # APPLE_API_ISSUER + APPLE_API_KEY_PATH, or APPLE_KEYCHAIN_PROFILE. Absent those it
 # logs a warning and carries on rather than failing.
+
+[package.metadata.packager.deb]
+# cargo-packager does not derive these — it writes exactly what is listed here, and
+# nothing if the field is absent. A .deb with no Depends installs cleanly and then
+# fails to start, which is the worst of the two failure modes.
+#
+# These are the runtime counterparts of the -dev packages the build needs (that list
+# was found by building in a container, see docs/PACKAGING.md).
+depends = [
+    "libx11-6",
+    "libxkbcommon0",
+    "libxkbcommon-x11-0",
+    "libwayland-client0",
+    "libxcb1",
+    "libxcb-render0",
+    "libxcb-shape0",
+    "libxcb-xfixes0",
+    "libasound2t64 | libasound2",
+    "libfontconfig1",
+    "libfreetype6",
+    "libgbm1",
+    "libvulkan1",
+    # The sftp backend runs it; without ssh that backend silently has no way to work.
+    "openssh-client",
+]
 
 [package.metadata.packager.dmg]
 # The classic drag-to-install window.

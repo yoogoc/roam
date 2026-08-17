@@ -105,16 +105,77 @@ env -u all_proxy -u ALL_PROXY cargo packager -p roam --release --formats dmg
 里**没有 LICENSE 文件**。配置里因此没有 `license-file`；要发布的话这个得补上（涉及版权
 署名，留给你定）。
 
+## CI：push 时自动打六个包
+
+`.github/workflows/package.yml`，矩阵是 mac / windows / linux × amd64 / arm64。
+
+触发限定在 **push 到 main、打 tag、以及手动 dispatch** —— 不是所有分支。每个矩阵项都是
+一次完整的依赖树构建（含 gpui），六份并行；特性分支不需要安装包。打 tag 时额外有一个
+`release` job 把产物挂到 GitHub Release 上。
+
+下表的"状态"一律指**在本机验证到哪一步**。**这份 workflow 本身从未在 runner 上跑过**
+（仓库还没有 remote），所以任何一行都不代表"CI 上验证过"。
+
+| 矩阵项 | runner | 格式 | 本机验证到哪 |
+| --- | --- | --- | --- |
+| macos-arm64 | `macos-15` | app, dmg | 打包+签名+启动，反复跑过 |
+| macos-amd64 | `macos-15` 上交叉编译 | app, dmg | 打包跑通，产出 x86_64 的 `Roam_0.1.0_x64.dmg` |
+| linux-amd64 | `ubuntu-24.04` | deb, appimage | 见下（容器验的是 arm64，amd64 属推断） |
+| linux-arm64 | `ubuntu-24.04-arm` | deb, appimage | **`.deb` 已打成**；AppImage 见下 |
+| windows-amd64 | `windows-2022` | nsis | **完全没验过**（没有 Windows 机器） |
+| windows-arm64 | `windows-11-arm` | nsis | **完全没验过** |
+
+Intel mac 用**交叉编译**而不是申请 Intel runner：macOS SDK 两个架构都能出，而 Intel
+runner 正在退役。本机实测过这条路 —— 产物落在 `target/x86_64-apple-darwin/release/`，
+所以工作流里的上传路径统一用 triple 目录。
+
+`before-packaging-command` 会读 `ROAM_BUILD_TARGET`，有值就加 `--target`。因此**同一条
+命令**在本地（不设变量，构建 host）和 CI（设了变量，交叉编译）都是对的，不需要维护两套。
+
+**没有验证过的平台标了 `continue-on-error: true`。** 那不是为了让徽章好看：已验证的平台
+一旦坏掉照样让整个 run 变红，而没建过的平台不会把它掩盖掉。每个 `true` 都是一句关于
+"到底验证到哪"的声明 —— 某个平台第一次成功出包之后，就该把它删掉。
+
+**runner label 我没法在这台机器上验证。** `ubuntu-24.04-arm` 和 `windows-11-arm` 是
+GitHub 较新提供的 arm64 runner；如果你的仓库还拿不到它们，那两项会以"找不到 runner"失败，
+而不是构建失败 —— 这两种失败看起来很像，别混。
+
 ## 其他平台
 
 `roam-core` 本身没有平台障碍（CI 的 Linux job 已经在跑它的测试）。挡在前面的是这些，
 都是查过代码而不是推测的：
 
-**Linux** — `deb`/`appimage` 的配置已经就绪，但：
+**Linux** — **编译已经在容器里验证过了**（arm64 的 `rust:1-slim`，`cargo check -p roam
+--release` 通过，`roam-core` / `roam-ui` / `roam` 三个 crate 全过，0 错误）。为此做了一件事：
+`gpui_platform` 的 feature 从只开 macOS 那两个改成上游的四个全开。
 
-- `gpui_platform` 需要 `x11`/`wayland` feature（当前只开了 `font-kit` 和
-  `runtime_shaders`，因为只面向 macOS），构建还需要对应的系统开发包；
-- **`roam-ui` 在 Linux 上从未构建过** —— 未验证项，不是"应该没问题"。
+这四个能同时开是因为它们映射到**按 target cfg 引入**的子 crate ——
+`font-kit`/`runtime_shaders` → `gpui_macos`，`x11`/`wayland` → `gpui_linux` —— 所以在
+macOS 上开 Linux 那两个不会拉进任何东西（macOS 侧重新验证过，0 错误）。
+
+需要的系统包（这份清单是在容器里试出来的，不是抄的）：
+
+```
+pkg-config libssl-dev
+libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
+libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+libasound2-dev libfontconfig1-dev libfreetype6-dev
+libgbm-dev libvulkan-dev
+```
+
+**`.deb` 已经在容器里真打出来了**（`roam_0.1.0_arm64.deb`，从 72 MB 的 aarch64 ELF
+二进制）。**AppImage 则失败**：linuxdeploy 要挂载自己的 AppImage 来运行，容器里没有 FUSE，
+于是 `terminate called after throwing an instance of 'std::logic_error'`。修法是
+`APPIMAGE_EXTRACT_AND_RUN=1`（工作流里已设），让它解压而不是挂载 —— runner 上同样会撞这堵墙。
+这条修法本身**未验证**：容器里没再跑一次。
+
+另外 cargo-packager **不自动探测 `.deb` 依赖**，只写配置里的 `depends`，不配就产出一个
+"能装、跑不起来"的包。配置里已按构建依赖补了对应运行时包（含 `openssh-client`，否则
+sftp 后端在 Linux 上没有 `ssh` 可用）。
+
+AppImage 的工具链在两个架构下都齐：`AppRun-{x86_64,aarch64}`、
+`linuxdeploy-{arch}.AppImage`、`linuxdeploy-plugin-appimage-{arch}.AppImage` 六个资产
+都实测返回 200。
 
 **Windows** — 有真实的功能损失：
 

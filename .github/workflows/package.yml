@@ -1,0 +1,147 @@
+name: package
+
+# Every push to main, plus tags, plus on demand. Deliberately *not* every branch:
+# each entry below is a full build of the dependency tree — gpui included — six
+# times over, and a feature branch does not need installers.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    # Only the platforms that have never been built are allowed to fail, so a break
+    # on a proven one still turns the run red. Each `true` below is a claim about
+    # what has actually been verified, not a way to keep the badge green — remove it
+    # the first time that platform packages successfully.
+    continue-on-error: ${{ matrix.unproven }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Verified locally, repeatedly: this is the one that is known to work.
+          - name: macos-arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+            formats: app,dmg
+            unproven: false
+
+          # Cross-compiled on the same arm64 runner rather than asking for an Intel
+          # one: the macOS SDK builds both, and the Intel runners are being retired.
+          - name: macos-amd64
+            runner: macos-15
+            target: x86_64-apple-darwin
+            formats: app,dmg
+            unproven: false
+
+          - name: linux-amd64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            formats: deb,appimage
+            unproven: true
+
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            formats: deb,appimage
+            unproven: true
+
+          # nsis rather than wix: cargo-packager fetches NSIS itself, while WiX wants
+          # a separate toolset install.
+          - name: windows-amd64
+            runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            formats: nsis
+            unproven: true
+
+          - name: windows-arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            formats: nsis
+            unproven: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Six jobs sharing one key would evict each other on every run.
+          key: ${{ matrix.name }}
+          workspaces: . -> target
+
+      # What gpui's Linux backend links against. Discovered by building in a
+      # container rather than guessed — see docs/PACKAGING.md.
+      - name: Linux build dependencies
+        if: startsWith(matrix.runner, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libssl-dev \
+            libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libasound2-dev libfontconfig1-dev libfreetype6-dev \
+            libgbm-dev libvulkan-dev
+
+      # `cargo install` rather than a prebuilt-binary action: cargo-packager is not
+      # in taiki-e/install-action's tool list (checked), so that route would just
+      # fail. The cache above covers the rebuild cost after the first run.
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --locked
+
+      # `before-packaging-command` reads ROAM_BUILD_TARGET and adds `--target` when
+      # it is set, so the same one command builds natively here and cross-compiles
+      # for the Intel mac.
+      - name: Package
+        env:
+          ROAM_BUILD_TARGET: ${{ matrix.target }}
+          # linuxdeploy mounts its own AppImage to run, which needs FUSE. Without
+          # this it dies with `terminate called after throwing an instance of
+          # 'std::logic_error'` — measured in a container, and runners hit the same
+          # wall. Extracting instead of mounting sidesteps it.
+          APPIMAGE_EXTRACT_AND_RUN: 1
+        run: >
+          cargo packager -p roam --release
+          --target ${{ matrix.target }}
+          --formats ${{ matrix.formats }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: roam-${{ matrix.name }}
+          # Whatever that platform produced. Listing exact filenames would mean
+          # encoding the version, and the version lives in Cargo.toml.
+          path: |
+            target/${{ matrix.target }}/release/*.dmg
+            target/${{ matrix.target }}/release/*.deb
+            target/${{ matrix.target }}/release/*.AppImage
+            target/${{ matrix.target }}/release/*-setup.exe
+            target/${{ matrix.target }}/release/*.msi
+          if-no-files-found: error
+
+  # Only on a tag, and only from artifacts that were actually produced.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          # A tag whose packages are missing a platform is better published
+          # incomplete than not published at all — the matrix says which failed.
+          fail_on_unmatched_files: false

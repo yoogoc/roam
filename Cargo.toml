@@ -31,9 +31,15 @@ opendal = { version = "0.58.1", default-features = false, features = [
 # the published gpui here instead would give us a *second*, incompatible `gpui`
 # crate — every type would be a different type, and nothing would line up.
 gpui = { git = "https://github.com/zed-industries/zed" }
+# All four, the way upstream does it. They are safe together because they map to
+# per-platform crates that gpui_platform only depends on for their own target:
+# font-kit/runtime_shaders → gpui_macos, x11/wayland → gpui_linux. Enabling the
+# Linux pair on macOS pulls in nothing.
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = [
     "font-kit",
     "runtime_shaders",
+    "x11",
+    "wayland",
 ] }
 gpui-component = { git = "https://github.com/longbridge/gpui-component" }
 # Upstream now ships the icon SVGs it names, which is what our own vendored set
