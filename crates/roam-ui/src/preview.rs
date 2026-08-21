@@ -104,7 +104,7 @@ impl PreviewPanel {
 
                 this.state = match bytes {
                     Ok(bytes) => render_state(&kind, bytes, limit),
-                    Err(err) => State::Unavailable(err.user_message().into()),
+                    Err(err) => State::Unavailable(err.full_message().into()),
                 };
                 cx.notify();
             });

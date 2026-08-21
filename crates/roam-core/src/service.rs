@@ -169,6 +169,16 @@ const S3: Service = Service {
             .required(),
         Field::text("prefix", "前缀", "可选，例如 team/reports").prefix(),
         Field::text("endpoint", "Endpoint", "自建或兼容服务填写，AWS 可留空"),
+        // Directly under the endpoint, because the two answer the same
+        // question — where requests go. It used to sit at the bottom of the
+        // longest form in the app, below the credentials and behind a scroll,
+        // where people looking for it concluded it did not exist.
+        Field::text(
+            "enable_virtual_host_style",
+            "使用 virtual-host 寻址",
+            "AWS 与阿里云 OSS 等需要打开，MinIO 等自建服务保持关闭",
+        )
+        .toggle("true", "false"),
         // Required, unlike the credentials: OpenDAL's S3 builder fails with
         // "region is missing" before any request, and it cannot be inferred
         // from an IAM role the way keys can.
@@ -184,12 +194,6 @@ const S3: Service = Service {
             "留空则使用环境变量或 IAM 角色",
         )
         .secret(),
-        Field::text(
-            "enable_virtual_host_style",
-            "使用 virtual-host 寻址",
-            "MinIO 等兼容服务通常需要关闭",
-        )
-        .toggle("true", "false"),
     ],
 };
 
@@ -528,6 +532,22 @@ mod tests {
                 "strict"
             );
         }
+    }
+
+    #[test]
+    fn the_addressing_toggle_sits_with_the_endpoint() {
+        // Not decoration: the two fields answer the same question, and the
+        // toggle spent its first life as the last row of the tallest form,
+        // where it had to be scrolled to and so was reported missing.
+        let s3 = for_scheme("s3").unwrap();
+        let keys: Vec<&str> = s3.fields.iter().map(|f| f.key).collect();
+        let endpoint = keys.iter().position(|k| *k == "endpoint").unwrap();
+        let toggle = keys
+            .iter()
+            .position(|k| *k == "enable_virtual_host_style")
+            .unwrap();
+
+        assert_eq!(toggle, endpoint + 1, "field order: {keys:?}");
     }
 
     #[test]

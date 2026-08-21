@@ -36,6 +36,9 @@ pub struct DirTree {
     /// Requests in flight, so a row can say so and a second click cannot queue
     /// the same listing twice.
     loading: BTreeSet<Arc<str>>,
+    /// Whether dot-directories are drawn. Mirrors the main pane's setting, so
+    /// the two halves of the window agree on what exists.
+    show_hidden: bool,
 }
 
 impl DirTree {
@@ -45,6 +48,26 @@ impl DirTree {
         // the panel look broken.
         tree.expanded.insert("".into());
         tree
+    }
+
+    /// Are dot-directories drawn?
+    pub fn show_hidden(&self) -> bool {
+        self.show_hidden
+    }
+
+    /// Show or hide dot-directories. Nothing is re-listed: the children are
+    /// already here, and hiding is a display decision.
+    pub fn set_show_hidden(&mut self, show: bool) {
+        self.show_hidden = show;
+    }
+
+    /// Should this child be drawn?
+    ///
+    /// An expanded dot-directory stays visible even while hidden files are off:
+    /// it is only ever expanded because someone navigated into it, and dropping
+    /// the row would leave the main pane pointing somewhere the tree denies.
+    fn is_visible(&self, dir: &str) -> bool {
+        self.show_hidden || !path::basename(dir).starts_with('.') || self.is_expanded(dir)
     }
 
     pub fn is_loaded(&self, dir: &str) -> bool {
@@ -112,8 +135,12 @@ impl DirTree {
         to_load
     }
 
+    /// Reset to a fresh root, keeping the display settings — a new session is a
+    /// new tree, not a new set of preferences.
     pub fn clear(&mut self) {
+        let show_hidden = self.show_hidden;
         *self = Self::new();
+        self.show_hidden = show_hidden;
     }
 
     /// The rows to draw, depth-first, parents before children.
@@ -138,11 +165,13 @@ impl DirTree {
             expanded,
             loading: self.is_loading(dir),
             // Only claim leafness once the directory has actually been listed —
-            // otherwise every unexpanded node would look childless.
+            // otherwise every unexpanded node would look childless. Hidden
+            // children do not count: a folder holding nothing but `.git` draws a
+            // triangle that expands to nothing otherwise.
             leaf: self
                 .children
                 .get(dir)
-                .map(|kids| kids.is_empty())
+                .map(|kids| !kids.iter().any(|kid| self.is_visible(kid)))
                 .unwrap_or(false),
         });
 
@@ -151,6 +180,9 @@ impl DirTree {
         }
 
         for child in self.children.get(dir).into_iter().flatten() {
+            if !self.is_visible(child) {
+                continue;
+            }
             self.push_rows(child, depth + 1, rows);
         }
     }
@@ -296,6 +328,66 @@ mod tests {
         tree.set_children("a/", dirs(&["a/b/"]));
 
         assert_eq!(tree.reveal("a/b/"), dirs(&["a/b/"]));
+    }
+
+    #[test]
+    fn dot_directories_stay_out_of_the_way() {
+        let mut tree = DirTree::new();
+        tree.set_children("", dirs(&[".git/", "docs/"]));
+
+        let labels = |tree: &DirTree| -> Vec<String> {
+            tree.visible().iter().map(|r| r.label.to_string()).collect()
+        };
+        assert_eq!(labels(&tree), vec!["/", "docs"]);
+
+        tree.set_show_hidden(true);
+        assert_eq!(labels(&tree), vec!["/", ".git", "docs"]);
+    }
+
+    #[test]
+    fn hiding_is_about_the_name_not_the_path() {
+        let mut tree = DirTree::new();
+        // The dot is on an ancestor, not on the child itself.
+        tree.set_children("", dirs(&[".config/"]));
+        tree.set_children(".config/", dirs(&[".config/nvim/"]));
+        tree.reveal(".config/");
+
+        // Revealed, so it stays on screen even with hidden files off — the main
+        // pane is standing in it.
+        let labels: Vec<String> = tree.visible().iter().map(|r| r.label.to_string()).collect();
+        assert_eq!(labels, vec!["/", ".config", "nvim"]);
+    }
+
+    #[test]
+    fn a_directory_of_only_dotfiles_is_a_leaf() {
+        let mut tree = DirTree::new();
+        tree.set_children("", dirs(&["project/"]));
+        tree.set_children("project/", dirs(&["project/.git/"]));
+
+        let project = |tree: &DirTree| {
+            tree.visible()
+                .into_iter()
+                .find(|r| &*r.path == "project/")
+                .unwrap()
+        };
+
+        // A triangle here would expand to nothing at all.
+        assert!(project(&tree).leaf);
+
+        tree.set_show_hidden(true);
+        assert!(!project(&tree).leaf);
+    }
+
+    #[test]
+    fn clearing_keeps_the_display_setting() {
+        let mut tree = DirTree::new();
+        tree.set_show_hidden(true);
+        tree.clear();
+
+        assert!(
+            tree.show_hidden(),
+            "a new session is a new tree, not a new preference"
+        );
     }
 
     #[test]

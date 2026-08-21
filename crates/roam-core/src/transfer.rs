@@ -327,7 +327,7 @@ impl TransferEngine {
             *state = match outcome {
                 Ok(()) => TaskState::Done,
                 Err(err) if err.is_cancelled() => TaskState::Cancelled,
-                Err(err) => TaskState::Failed(err.user_message()),
+                Err(err) => TaskState::Failed(err.full_message()),
             };
         });
     }
@@ -940,7 +940,12 @@ mod tests {
         settle(&engine).await;
 
         match &engine.snapshot()[0].state {
-            TaskState::Failed(reason) => assert_eq!(reason, "路径已不存在"),
+            // Headline first, then whatever the backend said — the panel is the
+            // only place a failed transfer ever explains itself.
+            TaskState::Failed(reason) => assert!(
+                reason.starts_with("路径已不存在：") && reason.len() > "路径已不存在：".len(),
+                "unhelpful reason: {reason}"
+            ),
             other => panic!("expected a failure, got {other:?}"),
         }
     }

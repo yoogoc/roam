@@ -2,12 +2,13 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, AppContext, ClickEvent, Context, Entity, InteractiveElement, IntoElement,
-    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window, div,
+    ParentElement, Pixels, Render, SharedString, StatefulInteractiveElement, Styled, Window, div,
     prelude::FluentBuilder, px,
 };
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::dialog::DialogButtonProps;
+use gpui_component::dialog::DialogFooter;
 use gpui_component::tab::{Tab, TabBar};
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName, Root, Sizable, Theme, ThemeMode, WindowExt, h_flex,
     v_flex,
@@ -89,7 +90,7 @@ impl Workspace {
         let (profiles, mut error) = match store.load() {
             Ok(profiles) => (profiles, None),
             Err(err) => {
-                tracing::warn!(error = %err.user_message(), "failed to load profiles");
+                tracing::warn!(error = %err.full_message(), "failed to load profiles");
                 (Vec::new(), Some(err))
             }
         };
@@ -155,14 +156,20 @@ impl Workspace {
         let engine = self.engine.clone();
         let browser = cx.new(|cx| Browser::new(vfs, engine, window, cx));
 
-        // Both hooks route through the workspace with the tab's id, so a
+        // The hooks route through the workspace with the tab's id, so a
         // background tab finishing a listing cannot move the sidebar.
         let this = cx.weak_entity();
+        let hidden = this.clone();
         let panel = self.transfers.downgrade();
         browser.update(cx, |browser, _| {
             browser.on_directory_changed(move |dir, cx| {
                 let _ = this.update(cx, |workspace, cx| {
                     workspace.tab_directory_changed(id, &dir, cx);
+                });
+            });
+            browser.on_hidden_changed(move |show, cx| {
+                let _ = hidden.update(cx, |workspace, cx| {
+                    workspace.tab_hidden_changed(id, show, cx);
                 });
             });
             browser.on_transfers_queued(move |_, cx| {
@@ -252,10 +259,25 @@ impl Workspace {
             (browser.vfs().clone(), browser.cwd().to_string())
         };
 
+        let show_hidden = browser.read(cx).show_hidden(cx);
+
         self.tree.update(cx, |tree, cx| {
             tree.set_vfs(vfs, cx);
+            // Before `set_current`, so revealing the current directory does not
+            // first draw rows the setting is about to remove.
+            tree.set_show_hidden(show_hidden, cx);
             tree.set_current(&cwd, cx);
         });
+    }
+
+    /// Each tab carries its own hidden-files setting, and the sidebar shows the
+    /// active one.
+    fn tab_hidden_changed(&mut self, tab_id: usize, show: bool, cx: &mut Context<Self>) {
+        if self.active_tab().id != tab_id {
+            return;
+        }
+        self.tree
+            .update(cx, |tree, cx| tree.set_show_hidden(show, cx));
     }
 
     fn tab_directory_changed(&mut self, tab_id: usize, dir: &str, cx: &mut Context<Self>) {
@@ -301,8 +323,9 @@ impl Workspace {
             }
             Err(err) => {
                 // A bad endpoint or a missing credential shows up here, before
-                // any request is made.
-                window.push_notification(err.user_message(), cx);
+                // any request is made. Say exactly what was wrong with it —
+                // "连接配置有误" on its own gives nothing to act on.
+                window.push_notification(err.full_message(), cx);
                 self.error = Some(err);
             }
         }
@@ -364,22 +387,55 @@ impl Workspace {
 
         let this = cx.weak_entity();
 
-        window.open_dialog(cx, move |dialog, _window, _cx| {
+        window.open_dialog(cx, move |dialog, window, _cx| {
             let form = form.clone();
-            let this = this.clone();
+            let on_save = this.clone();
+            let on_enter = this.clone();
+
+            let ceiling = dialog_max_height(window.viewport_size().height);
 
             dialog
                 .title(title.clone())
                 .w(px(520.))
-                .button_props(
-                    DialogButtonProps::default()
-                        .ok_text("保存")
-                        .cancel_text("取消")
-                        .show_cancel(true),
-                )
+                // The one line that makes the form scrollable at all — see
+                // `dialog_max_height`.
+                .max_h(ceiling)
                 .child(form.clone())
+                // gpui-component renders `button_props` as actual buttons only
+                // for an AlertDialog. A plain Dialog takes them as the Enter and
+                // Escape handlers and draws no footer whatsoever, so this dialog
+                // had nothing to click: the only way out was Esc or the close
+                // cross, and the only way to save was Enter.
+                .footer(
+                    DialogFooter::new()
+                        .child(
+                            Button::new("cancel-connection")
+                                .label("取消")
+                                .outline()
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("save-connection")
+                                .label("保存")
+                                .primary()
+                                .on_click(move |_, window, cx| {
+                                    let done = on_save
+                                        .update(cx, |workspace, cx| workspace.save_form(window, cx))
+                                        .unwrap_or(false);
+                                    // False means the form rejected the input and
+                                    // said so; leaving the dialog open keeps what
+                                    // was typed.
+                                    if done {
+                                        window.close_dialog(cx);
+                                    }
+                                }),
+                        ),
+                )
+                // Enter goes through the same check, and the framework closes
+                // the dialog when it returns true.
                 .on_ok(move |_, window, cx| {
-                    this.update(cx, |workspace, cx| workspace.save_form(window, cx))
+                    on_enter
+                        .update(cx, |workspace, cx| workspace.save_form(window, cx))
                         .unwrap_or(false)
                 })
         });
@@ -396,7 +452,7 @@ impl Workspace {
             Ok(profile) => profile,
             Err(err) => {
                 // Keep the dialog open so the input is not lost.
-                window.push_notification(err.user_message(), cx);
+                window.push_notification(err.full_message(), cx);
                 return false;
             }
         };
@@ -408,7 +464,7 @@ impl Workspace {
         }
 
         if let Err(err) = self.store.save(&profiles) {
-            window.push_notification(err.user_message(), cx);
+            window.push_notification(err.full_message(), cx);
             return false;
         }
 
@@ -434,7 +490,7 @@ impl Workspace {
             .collect();
 
         if let Err(err) = self.store.save(&remaining) {
-            window.push_notification(err.user_message(), cx);
+            window.push_notification(err.full_message(), cx);
             return;
         }
 
@@ -825,11 +881,21 @@ impl Render for Workspace {
                                 .border_color(cx.theme().border)
                                 .child(div().text_sm().child(title))
                                 .when_some(self.error.clone(), |el, err| {
+                                    // One line shared with the title, so the
+                                    // backend's own words go in a tooltip when
+                                    // they do not fit.
+                                    let full: SharedString = err.full_message().into();
                                     el.child(
                                         div()
+                                            .id("connect-error")
                                             .text_xs()
+                                            .min_w_0()
+                                            .truncate()
                                             .text_color(cx.theme().danger)
-                                            .child(err.user_message()),
+                                            .child(full.clone())
+                                            .tooltip(move |window, cx| {
+                                                Tooltip::new(full.clone()).build(window, cx)
+                                            }),
                                     )
                                 }),
                         )
@@ -848,6 +914,21 @@ impl Render for Workspace {
             .children(Root::render_dialog_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))
     }
+}
+
+/// How tall the connection dialog may get, given the window's height.
+///
+/// The dialog has to be the thing that is bounded. gpui-component wraps a
+/// dialog's children in a scroll area already, but that area only ever
+/// overflows — and so only ever grows a scrollbar — if the popup around it has
+/// a ceiling; left alone the popup simply gets taller than the window, taking
+/// the buttons with it. The form itself must not carry the cap instead: see the
+/// comment in `ConnectionForm::render` for why capping a scrollable clips it.
+///
+/// The popup is anchored a tenth of the way down the window, so 0.8 leaves the
+/// same margin underneath it.
+fn dialog_max_height(viewport_height: Pixels) -> Pixels {
+    viewport_height * 0.8
 }
 
 #[cfg(test)]
@@ -960,7 +1041,7 @@ pub(crate) mod tests {
 
         pub(crate) fn error_message(&mut self) -> Option<String> {
             self.workspace
-                .read_with(&self.cx, |w, _| w.error.as_ref().map(|e| e.user_message()))
+                .read_with(&self.cx, |w, _| w.error.as_ref().map(|e| e.full_message()))
         }
 
         /// The active pane's own error banner, which is where a failed listing
@@ -1075,6 +1156,20 @@ pub(crate) mod tests {
             panic!("the tree never settled: {:?}", self.tree_labels());
         }
 
+        /// Flip the active pane's hidden-files setting, exactly as the toolbar
+        /// button does.
+        pub(crate) fn toggle_hidden(&mut self) {
+            let workspace = self.workspace.clone();
+            self.cx.update(|_, cx| {
+                workspace.update(cx, |w, cx| {
+                    let browser = w.active_browser().clone();
+                    browser.update(cx, |browser, cx| browser.toggle_hidden_for_test(cx));
+                });
+            });
+            self.settle();
+            self.settle_tree();
+        }
+
         pub(crate) fn toggle_tree(&mut self, dir: &str) {
             let workspace = self.workspace.clone();
             let dir = dir.to_string();
@@ -1148,6 +1243,20 @@ pub(crate) mod tests {
         let err = h.workspace.read_with(&h.cx, |w, _| w.error.clone());
         assert!(err.is_none(), "first run should be quiet");
         assert!(!h.config_path.exists());
+    }
+
+    /// The buttons live at the bottom of the popup, so a dialog that does not
+    /// fit under its own anchor takes them off the screen — which is exactly
+    /// how the connection dialog came to have no visible way to save or cancel.
+    #[test]
+    fn the_dialog_fits_under_its_own_anchor() {
+        for height in [px(600.), px(760.), px(1400.)] {
+            let bottom = height / 10. + dialog_max_height(height);
+            assert!(
+                bottom <= height,
+                "at {height:?} the dialog ends at {bottom:?}"
+            );
+        }
     }
 
     #[gpui::test]
@@ -1463,6 +1572,49 @@ mod tree_tests {
     }
 
     #[gpui::test]
+    fn dot_directories_stay_out_of_the_tree(cx: &mut TestAppContext) {
+        let mut h = Harness::new(cx);
+        h.make_dirs(&[".git", "alpha"]);
+        h.reconnect_local();
+        h.settle_tree();
+
+        // A repository checkout is mostly `.git` by volume; the sidebar is for
+        // the directories someone is actually browsing.
+        assert_eq!(h.tree_labels(), vec!["/", "  alpha"]);
+    }
+
+    #[gpui::test]
+    fn the_hidden_files_toggle_reaches_the_tree(cx: &mut TestAppContext) {
+        let mut h = Harness::new(cx);
+        h.make_dirs(&[".git", "alpha"]);
+        h.reconnect_local();
+        h.settle_tree();
+
+        // One setting, both halves of the window: a pane listing `.git` beside a
+        // tree denying it exists is the confusing case.
+        h.toggle_hidden();
+        assert_eq!(h.tree_labels(), vec!["/", "  .git", "  alpha"]);
+
+        h.toggle_hidden();
+        assert_eq!(h.tree_labels(), vec!["/", "  alpha"]);
+    }
+
+    #[gpui::test]
+    fn navigating_into_a_dot_directory_still_reveals_it(cx: &mut TestAppContext) {
+        let mut h = Harness::new(cx);
+        h.make_dirs(&[".config", ".config/nvim"]);
+        h.reconnect_local();
+        h.settle_tree();
+        assert_eq!(h.tree_labels(), vec!["/"]);
+
+        // Typed into the pane rather than clicked in the tree. Hiding the row now
+        // would leave the sidebar denying where the pane is standing.
+        h.navigate_pane(".config/nvim/");
+
+        assert_eq!(h.tree_labels(), vec!["/", "  .config", "    nvim"]);
+    }
+
+    #[gpui::test]
     fn switching_sessions_resets_the_tree(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         h.make_dirs(&["alpha"]);
@@ -1700,10 +1852,18 @@ mod s3_tests {
         // request is made — but the pane must surface the failure rather than
         // looking like an empty bucket.
         h.settle();
-        assert_eq!(
-            h.pane_error(),
-            Some("没有访问权限".to_string()),
-            "an empty pane with no message is indistinguishable from an empty bucket"
+        let shown = h
+            .pane_error()
+            .expect("an empty pane with no message is indistinguishable from an empty bucket");
+        assert!(
+            shown.starts_with("没有访问权限："),
+            "the headline should still lead: {shown}"
+        );
+        // And the server's own words follow it — "没有访问权限" alone does not
+        // say which key was rejected.
+        assert!(
+            shown.len() > "没有访问权限：".len(),
+            "no detail from the server: {shown}"
         );
     }
 }

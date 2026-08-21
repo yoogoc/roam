@@ -42,6 +42,10 @@ type TransfersQueued = Rc<dyn Fn(&mut Window, &mut gpui::App)>;
 /// Fired when the shown directory changes, so the sidebar tree can follow.
 type DirectoryChanged = Rc<dyn Fn(Arc<str>, &mut gpui::App)>;
 
+/// Fired when dotfiles are shown or hidden, so the sidebar tree agrees with the
+/// pane about what exists.
+type HiddenChanged = Rc<dyn Fn(bool, &mut gpui::App)>;
+
 /// One browsing pane over one backend session.
 pub struct Browser {
     vfs: Vfs,
@@ -50,6 +54,8 @@ pub struct Browser {
     on_transfers_queued: Option<TransfersQueued>,
     /// Called when the shown directory changes, so the sidebar tree can follow.
     on_directory_changed: Option<DirectoryChanged>,
+    /// Called when the hidden-files setting flips, for the same reason.
+    on_hidden_changed: Option<HiddenChanged>,
     cache: Arc<ListingCache>,
     session: SessionId,
     table: Entity<TableState<EntriesDelegate>>,
@@ -132,6 +138,7 @@ impl Browser {
             engine,
             on_transfers_queued: None,
             on_directory_changed: None,
+            on_hidden_changed: None,
             cache: Arc::new(ListingCache::new()),
             session: 0,
             table,
@@ -178,6 +185,12 @@ impl Browser {
         self.on_directory_changed = Some(Rc::new(callback));
     }
 
+    /// Install a callback fired whenever dotfiles are shown or hidden, so the
+    /// sidebar tree can match.
+    pub fn on_hidden_changed(&mut self, callback: impl Fn(bool, &mut gpui::App) + 'static) {
+        self.on_hidden_changed = Some(Rc::new(callback));
+    }
+
     /// Install a callback fired whenever transfers are queued, so the transfer
     /// panel can begin polling for progress.
     pub fn on_transfers_queued(
@@ -188,9 +201,10 @@ impl Browser {
     }
 
     /// The pane's current error, if any — a failed listing shows here rather
-    /// than in the connection banner.
+    /// than in the connection banner. Headline and backend detail in one
+    /// string; the banner itself renders them on separate lines.
     pub fn error_message(&self) -> Option<String> {
-        self.error.as_ref().map(|err| err.user_message())
+        self.error.as_ref().map(|err| err.full_message())
     }
 
     /// True while a listing or a mutation is still running.
@@ -256,7 +270,7 @@ impl Browser {
                         // here means the capability check and the menu
                         // disagreed — say so rather than fail silently.
                         Ok(None) => "该后端不支持分享链接".to_string(),
-                        Err(err) => err.user_message(),
+                        Err(err) => err.full_message(),
                     };
 
                     let _ = handle.update(cx, |_, window, cx| {
@@ -360,17 +374,23 @@ impl Browser {
     /// here, and re-fetching a large directory to change a display setting would
     /// be the wrong trade entirely.
     fn toggle_hidden(&mut self, cx: &mut Context<Self>) {
+        let show = !self.show_hidden(cx);
         self.table.update(cx, |state, cx| {
-            let delegate = state.delegate_mut();
-            let show = !delegate.show_hidden();
-            delegate.set_show_hidden(show);
+            state.delegate_mut().set_show_hidden(show);
             state.refresh(cx);
         });
+
+        if let Some(callback) = self.on_hidden_changed.clone() {
+            // Deferred for the same reason as the directory callback: this runs
+            // inside a Browser update and the callback touches a sibling entity.
+            cx.defer(move |cx| callback(show, cx));
+        }
         cx.notify();
     }
 
-    /// Whether dotfiles are currently listed, for the toolbar button's state.
-    fn show_hidden(&self, cx: &gpui::App) -> bool {
+    /// Whether dotfiles are currently listed, for the toolbar button's state —
+    /// and for the sidebar tree, which follows this pane.
+    pub fn show_hidden(&self, cx: &gpui::App) -> bool {
         self.table.read(cx).delegate().show_hidden()
     }
 
@@ -578,7 +598,7 @@ impl Browser {
 
             let message = match &outcome {
                 Ok(()) => done_message.to_string(),
-                Err(err) => err.user_message(),
+                Err(err) => err.full_message(),
             };
             let _ = handle.update(cx, |_, window, cx| {
                 window.push_notification(message, cx);
@@ -862,7 +882,7 @@ impl Browser {
                     engine.enqueue_all(transfers);
                     format!("已加入 {count} 个{what}任务")
                 }
-                Err(err) => err.user_message(),
+                Err(err) => err.full_message(),
             };
 
             let _ = handle.update(cx, |_, window, cx| {
@@ -894,7 +914,7 @@ impl Browser {
                         browser.open_versions_dialog(entry.clone(), versions, window, cx);
                     });
                 }
-                Err(err) => window.push_notification(err.user_message(), cx),
+                Err(err) => window.push_notification(err.full_message(), cx),
             });
         })
         .detach();
@@ -1156,7 +1176,23 @@ impl Browser {
                     .size_4()
                     .text_color(cx.theme().danger),
             )
-            .child(div().flex_1().child(err.user_message()))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(err.user_message())
+                    // "没有访问权限" alone leaves the person guessing which
+                    // credential the backend objected to; its own words say so.
+                    .when_some(err.detail(), |el, detail| {
+                        el.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(detail),
+                        )
+                    }),
+            )
             .child(
                 Button::new("retry")
                     .label("重试")
@@ -1196,6 +1232,10 @@ impl Browser {
 
 #[cfg(test)]
 impl Browser {
+    pub(crate) fn toggle_hidden_for_test(&mut self, cx: &mut Context<Self>) {
+        self.toggle_hidden(cx);
+    }
+
     pub(crate) fn can_go_back(&self) -> bool {
         !self.back.is_empty()
     }

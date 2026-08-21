@@ -11,12 +11,11 @@
 use std::collections::BTreeMap;
 
 use gpui::{
-    AnyElement, App, AppContext, ClickEvent, Context, Entity, InteractiveElement, IntoElement,
-    ParentElement, Pixels, Render, SharedString, Styled, Window, div, prelude::FluentBuilder, px,
+    AnyElement, App, AppContext, ClickEvent, Context, Entity, IntoElement, ParentElement, Render,
+    SharedString, Styled, Window, div, prelude::FluentBuilder,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
-use gpui_component::scroll::ScrollableElement;
 use gpui_component::switch::Switch;
 use gpui_component::{ActiveTheme, Sizable, h_flex, v_flex};
 use roam_core::service::{self, Field, FieldKind, Service};
@@ -184,25 +183,8 @@ impl ConnectionForm {
     }
 }
 
-/// How tall the scrolling field list may get, given the window's height.
-///
-/// The dialog itself has no height of its own to lend: gpui-component 0.5.1
-/// offers `w`/`max_w` and nothing vertical, so its box grows to fit whatever it
-/// is given. Its inner scroll area is `flex_1` inside that unbounded box, which
-/// means it never overflows and its scrollbar never appears — the S3 form simply
-/// ran off the bottom of the window with no way to reach the rest.
-///
-/// Sized from the viewport rather than fixed, so a short window still leaves room
-/// for the title, the name and type rows, and the footer buttons. The floor keeps
-/// the list usable when the window is very small; the dialog may then extend past
-/// the edge, which is worse than scrolling but better than a field list two rows
-/// tall.
-fn fields_max_height(viewport_height: Pixels) -> Pixels {
-    (viewport_height * 0.55).max(px(200.))
-}
-
 impl Render for ConnectionForm {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let scheme = self.scheme;
 
         let mut buttons = Vec::new();
@@ -246,22 +228,32 @@ impl Render for ConnectionForm {
             .text_color(cx.theme().muted_foreground)
             .child(placeholders::CREDENTIAL_STORAGE_NOTE);
 
-        // Only the field list scrolls. Name, type and the storage note stay put:
-        // the first two say which connection this is, and the third is the one
-        // line a person should not have to scroll to find.
-        let fields = v_flex()
-            .id("connection-fields")
-            .gap_3()
-            .max_h(fields_max_height(window.viewport_size().height))
-            .overflow_y_scrollbar()
-            .children(rows);
-
+        // Plain and unbounded on purpose. **Do not cap this and hang a
+        // scrollbar on it** — that is what was here, twice, and it is why the
+        // form has spent its whole life silently cutting off whichever fields
+        // came last (the virtual-host toggle, then the S3 credentials).
+        //
+        // `overflow_y_scrollbar()` copies the element's `max_size` onto both
+        // the wrapper *and* the scrolled content, and the content is then laid
+        // out `h_auto`. A capped content box is exactly as tall as its own
+        // limit, so it never overflows its scroll area: no scrollbar appears,
+        // nothing scrolls, and the rows past the cap are simply clipped away.
+        //
+        // The dialog owns the height instead. `workspace::open_form` caps the
+        // popup, and gpui-component's own body wrapper — `flex_1` +
+        // `overflow_hidden` around a `size_full` scroll area, with no
+        // `max_size` on the scrollable — turns that into a real scrollbar over
+        // the whole form, with the title and the buttons staying put.
+        //
+        // The note goes above the fields rather than below them: it is about
+        // what happens to a credential, so it belongs where it is read before
+        // one is typed, not at the far end of a scroll.
         v_flex()
             .gap_3()
             .child(name_row)
             .child(type_row)
-            .child(fields)
             .child(note)
+            .children(rows)
     }
 }
 
@@ -368,33 +360,6 @@ impl ConnectionForm {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_field_list_is_capped_against_the_window_not_a_fixed_size() {
-        // A tall window gives the list room proportional to itself…
-        assert_eq!(fields_max_height(px(1000.)), px(550.));
-        // …and a short one falls back to the floor rather than to something
-        // unusably small. 200 * 0.55 = 110, which would be two rows.
-        assert_eq!(fields_max_height(px(200.)), px(200.));
-    }
-
-    /// Every service's field list has to be reachable. S3 is the tallest at seven
-    /// fields; at roughly 56px per row that is ~390px, which is why the cap is a
-    /// fraction of the viewport rather than a number that happens to fit today.
-    #[test]
-    fn the_cap_leaves_room_for_the_tallest_service() {
-        let tallest = service::SERVICES
-            .iter()
-            .map(|s| s.fields.len())
-            .max()
-            .unwrap();
-        assert!(tallest >= 7, "S3 should still be the tallest: {tallest}");
-
-        // On the window size the app actually opens at, the cap must be enough
-        // to show several rows before scrolling starts.
-        let cap = fields_max_height(px(760.));
-        assert!(cap > px(400.), "got {cap:?}");
-    }
 
     /// The schema is what the form renders, so a field the form cannot draw
     /// would be invisible-but-required — the connection would simply refuse to

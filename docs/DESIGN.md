@@ -225,11 +225,15 @@ let op = Operator::from_uri((profile.uri.as_str(), options))?
 - **开关处于关闭态不能写盘。** 原本把 off 值也写进 options,于是「打开编辑、只改 region、保存」会顺手给 profile 盖上一个用户从未表达过的 `enable_virtual_host_style = false`。往返一次必须是恒等变换 —— 这条由 `editing_without_changing_anything_leaves_the_profile_identical` 守着,它就是被这个 bug 逼出来的。
 - **fs 的目录该进 URI,不该当 option。** 原来 uri 固定 `fs:///` 加一个 `root` 选项。实测 OpenDAL 的 fs service 直接认 `fs:///path`（真列举验证过),所以目录改用 `UriPrefix`,顺带让手写的 `fs:///tmp` 这种 profile 继续有效。绝对路径需要保留前导斜杠,这由 `Field::absolute` 标记,否则表单会把 `/Users/x` 显示成 `Users/x`。
 
-**对话框不会滚动。** 表单一变长就露出来了:S3 有 7 个字段,内容直接跑到窗口下面去,没有滚动条。原因不是缺滚动能力 —— gpui-component 的 dialog **已经**把内容包在 `overflow_y_scrollbar()` 里了。问题是那个滚动区是无限高盒子里的 `flex_1`:dialog 只有 `w`/`max_w`,**没有任何纵向尺寸接口**,盒子会一直长高,内层于是永远不溢出,滚动条永远不出现。
+**对话框不会滚动,也没有按钮。** 表单一变长就露出来了:S3 有 7 个字段,内容直接跑到窗口下面去。这是两个独立的坑,只是同一张表单同时踩中:
 
-所以高度上限只能由我们这边给:字段列表限高并滚动,名称 / 类型 / 存储说明留在滚动区外常驻 —— 前两个说明「这是哪个连接」,第三个是那句不该让人滚动才能看到的话。上限按视口比例算(`viewport * 0.55`,下限 200px)而不是写死,否则小窗口下会退化成两行高的列表;这条由单测守着。
+- **限高不能加在滚动元素自己身上。** 这条让 bug 活过了两个版本:`.max_h(…).overflow_y_scrollbar()` 写在一起看着天经地义,实际永远不可能滚。`Scrollable` 会把元素的 `max_size` 同时复制到外层包装**和**被滚动的内容上,内容随后按 `h_auto` 排版 —— 一个被限高的内容盒子恰好只有上限那么高,于是永远不会溢出它自己的滚动区:滚动条不出现,滚轮无效,超出上限的行被静默裁掉。所以初版那句「字段列表限高并滚动」其实是「限高并**裁剪**」:先被吃掉的是排在最后的 virtual-host 开关(于是有人报「没有这个开关」),把开关挪到 Endpoint 下面之后,轮到 S3 的两个凭据(于是有人报「凭据不见了」)。同一个 bug,两次不同的症状。
+- **该被限高的是对话框。** gpui-component 其实早就把 dialog 的 children 包在滚动区里了 —— `flex_1` + `overflow_hidden` 外面,套一个 `size_full` 的滚动区,注意它**没有**给那个滚动元素加 `max_size`(`overflow_hidden` 让 flex 的自动最小高度变成 0,所以它真的能被压缩)。缺的只是 popup 的一个上限。`Dialog` 实现了 `Styled`,`refine_style` 就落在 popup 上,所以 `.max_h()` 是有效的(`w` / `max_w` 是专门的方法,容易让人以为纵向没接口,其实只是没有同名的那个)。取视口的 0.8:popup 锚在 1/10 高处,正好上下留一样的边。于是标题和按钮固定,整张表单作为一个区域一起滚 —— 表单自己不再限高,也不再挂滚动条。
+- **按钮压根没被渲染。** `DialogButtonProps` 的 `ok_text` / `cancel_text` / `show_cancel` 只有 `AlertDialog` 会画成按钮;普通 `Dialog` 只拿它当 Enter / Esc 的回调,`footer` 是 `None` 就什么都不画。所以这个框此前只能 Esc 退出、Enter 保存,鼠标无路可走 —— 而这两个入口都不写在界面上。现在自己给 `.footer(DialogFooter::new()…)`,「保存」和 Enter 走同一个 `save_form`:返回 false(校验没过)就不关,输入不丢。
 
-验证:表单在真实平台文本栈下打开过（`examples/connection_dialog`,现在直接打开 **S3** 这个最高的表单 —— 窗口 672px 高时上限约 370px,而 7 个字段约 390–420px,所以这个例子真的触发了溢出而非空跑;窗口 900×672,无 abort —— 掩码输入和开关都是新东西,而 placeholder 那次崩溃的教训就是这类排版问题只在真实文本栈下暴露);另有一条**闭环测试**（`a_profile_built_the_way_the_form_builds_it_connects`）把「人会输入的值 → `build_profile` → 真实 MinIO 上传并列举」整条走通 —— 其余测试都是手搓 profile,只验证了 schema 自己,没验证过它对服务器是否成立。
+存储说明从表单底部挪到字段**上面**:它讲的是凭据会被怎么存,该在人输入凭据之前读到,而不是在滚动的另一头。
+
+验证:表单在真实平台文本栈下打开过（`examples/connection_dialog`,现在直接打开 **S3** 这个最高的表单 —— 窗口 672px 高时对话框上限约 538px,而 7 个带标签的字段连同名称 / 类型 / 说明约 690px,所以这个例子真的触发了滚动而非空跑;窗口 900×672,无 abort —— 掩码输入和开关都是新东西,而 placeholder 那次崩溃的教训就是这类排版问题只在真实文本栈下暴露);另有一条**闭环测试**（`a_profile_built_the_way_the_form_builds_it_connects`）把「人会输入的值 → `build_profile` → 真实 MinIO 上传并列举」整条走通 —— 其余测试都是手搓 profile,只验证了 schema 自己,没验证过它对服务器是否成立。
 
 ---
 

@@ -37,16 +37,16 @@ boundary through `roam_core::rt::Rt::spawn`. See `docs/DESIGN.md` §2.
 ## Tests
 
 ```
-cargo test -p roam-core         # 229 pass
+cargo test -p roam-core         # 261 pass
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
-`roam-core` carries 229 tests: 176 unit, 46 backend integration tests that report
+`roam-core` carries 261 tests: 201 unit, 48 backend integration tests that report
 success by skipping when no server is configured (`scripts/test-backends.sh` is
-what makes them run for real), and 7 scale tests.
+what makes them run for real), and 12 scale tests.
 
-> **`cargo test -p roam-ui` currently fails on macOS — 75 of its 92 tests.** Not
+> **`cargo test -p roam-ui` currently fails on macOS — 78 of its 110 tests.** Not
 > our code: `Root::new` installs a macOS accessibility hook that needs a real
 > `NSView`, and gpui's test window answers with `unimplemented!()` instead of the
 > `Err` its trait allows. Every test that builds a `Root` panics. The app itself is

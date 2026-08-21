@@ -1129,6 +1129,16 @@ mod tests {
         let err = vfs.stat("nope/").await.unwrap_err();
         assert_eq!(err.kind(), Some(opendal::ErrorKind::NotFound));
         assert_eq!(err.user_message(), "路径已不存在");
+
+        // A real backend failure carries the backend's own explanation, which
+        // the banner shows under the headline.
+        let detail = err.detail().expect("the fs service explains itself");
+        assert!(!detail.is_empty(), "empty detail");
+        assert!(
+            err.full_message().starts_with("路径已不存在："),
+            "got {}",
+            err.full_message()
+        );
     }
 
     #[tokio::test]
@@ -1217,6 +1227,31 @@ mod tests {
         profile.options.insert("region".into(), "us-east-1".into());
 
         Vfs::from_profile(Rt::from_current().unwrap(), &profile).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_virtual_host_toggle_reaches_the_s3_builder() {
+        // The toggle is stored as the string "true", and nothing between the
+        // form and OpenDAL would complain if that string were dropped or
+        // misspelled — the connection would simply keep using path style and
+        // fail against a bucket that only answers virtual-host requests.
+        //
+        // A dotted bucket is the one thing that tells the two apart from out
+        // here: it cannot live in a hostname, so OpenDAL rejects it when, and
+        // only when, virtual-host style is actually on.
+        let mut on = crate::Profile::new("vh", "S3", "s3://my.bucket/prefix");
+        on.options.insert("region".into(), "us-east-1".into());
+        on.options
+            .insert("enable_virtual_host_style".into(), "true".into());
+
+        let err = Vfs::from_profile(Rt::from_current().unwrap(), &on).unwrap_err();
+        assert_eq!(err.kind(), Some(opendal::ErrorKind::ConfigInvalid));
+
+        // And with the toggle off — which is what an absent option means — the
+        // same bucket is fine.
+        let mut off = on.clone();
+        off.options.remove("enable_virtual_host_style");
+        Vfs::from_profile(Rt::from_current().unwrap(), &off).unwrap();
     }
 
     #[tokio::test]
