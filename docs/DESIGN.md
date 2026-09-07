@@ -229,7 +229,7 @@ let op = Operator::from_uri((profile.uri.as_str(), options))?
 
 - **限高不能加在滚动元素自己身上。** 这条让 bug 活过了两个版本:`.max_h(…).overflow_y_scrollbar()` 写在一起看着天经地义,实际永远不可能滚。`Scrollable` 会把元素的 `max_size` 同时复制到外层包装**和**被滚动的内容上,内容随后按 `h_auto` 排版 —— 一个被限高的内容盒子恰好只有上限那么高,于是永远不会溢出它自己的滚动区:滚动条不出现,滚轮无效,超出上限的行被静默裁掉。所以初版那句「字段列表限高并滚动」其实是「限高并**裁剪**」:先被吃掉的是排在最后的 virtual-host 开关(于是有人报「没有这个开关」),把开关挪到 Endpoint 下面之后,轮到 S3 的两个凭据(于是有人报「凭据不见了」)。同一个 bug,两次不同的症状。
 - **该被限高的是对话框。** gpui-component 其实早就把 dialog 的 children 包在滚动区里了 —— `flex_1` + `overflow_hidden` 外面,套一个 `size_full` 的滚动区,注意它**没有**给那个滚动元素加 `max_size`(`overflow_hidden` 让 flex 的自动最小高度变成 0,所以它真的能被压缩)。缺的只是 popup 的一个上限。`Dialog` 实现了 `Styled`,`refine_style` 就落在 popup 上,所以 `.max_h()` 是有效的(`w` / `max_w` 是专门的方法,容易让人以为纵向没接口,其实只是没有同名的那个)。取视口的 0.8:popup 锚在 1/10 高处,正好上下留一样的边。于是标题和按钮固定,整张表单作为一个区域一起滚 —— 表单自己不再限高,也不再挂滚动条。
-- **按钮压根没被渲染。** `DialogButtonProps` 的 `ok_text` / `cancel_text` / `show_cancel` 只有 `AlertDialog` 会画成按钮;普通 `Dialog` 只拿它当 Enter / Esc 的回调,`footer` 是 `None` 就什么都不画。所以这个框此前只能 Esc 退出、Enter 保存,鼠标无路可走 —— 而这两个入口都不写在界面上。现在自己给 `.footer(DialogFooter::new()…)`,「保存」和 Enter 走同一个 `save_form`:返回 false(校验没过)就不关,输入不丢。
+- **按钮压根没被渲染。** `DialogButtonProps` 的 `ok_text` / `cancel_text` / `show_cancel` 只有 `AlertDialog` 会画成按钮;普通 `Dialog` 只拿它当 Enter / Esc 的回调,`footer` 是 `None` 就什么都不画。所以这个框此前只能 Esc 退出、Enter 保存,鼠标无路可走 —— 而这两个入口都不写在界面上。**全 app 五个对话框都中招**,最糟的是删除确认:它还特意关掉了背景点击和右上角的叉(见下),于是一个专门用来问「确定吗」的框,唯一的出路是按 Esc。现在 footer 由 `ui/src/dialog.rs` 的 `DialogButtons` 扩展 trait 统一给出,点击和 Enter 走同一个闭包 —— 返回 false(校验没过)就不关,输入不丢。有一条测试扫源码,禁止任何 view 再自己写 `DialogButtonProps`。
 
 存储说明从表单底部挪到字段**上面**:它讲的是凭据会被怎么存,该在人输入凭据之前读到,而不是在滚动的另一头。
 

@@ -46,7 +46,7 @@ cargo fmt --all --check
 success by skipping when no server is configured (`scripts/test-backends.sh` is
 what makes them run for real), and 12 scale tests.
 
-> **`cargo test -p roam-ui` currently fails on macOS — 78 of its 110 tests.** Not
+> **`cargo test -p roam-ui` currently fails on macOS — 78 of its 111 tests.** Not
 > our code: `Root::new` installs a macOS accessibility hook that needs a real
 > `NSView`, and gpui's test window answers with `unimplemented!()` instead of the
 > `Err` its trait allows. Every test that builds a `Root` panics. The app itself is

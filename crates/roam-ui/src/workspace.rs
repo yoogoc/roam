@@ -6,7 +6,6 @@ use gpui::{
     prelude::FluentBuilder, px,
 };
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::dialog::DialogFooter;
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{
@@ -19,6 +18,7 @@ use roam_core::{Error, Profile, ProfileId, ProfileStore, Rt, TransferEngine, Vfs
 use crate::actions::{CloseTab, NewTab, NextTab, PrevTab, WORKSPACE_CONTEXT};
 use crate::browser::Browser;
 use crate::connection_form::ConnectionForm;
+use crate::dialog::DialogButtons;
 use crate::dir_tree::DirTreeView;
 use crate::transfer_panel::TransferPanel;
 
@@ -389,8 +389,7 @@ impl Workspace {
 
         window.open_dialog(cx, move |dialog, window, _cx| {
             let form = form.clone();
-            let on_save = this.clone();
-            let on_enter = this.clone();
+            let this = this.clone();
 
             let ceiling = dialog_max_height(window.viewport_size().height);
 
@@ -401,41 +400,10 @@ impl Workspace {
                 // `dialog_max_height`.
                 .max_h(ceiling)
                 .child(form.clone())
-                // gpui-component renders `button_props` as actual buttons only
-                // for an AlertDialog. A plain Dialog takes them as the Enter and
-                // Escape handlers and draws no footer whatsoever, so this dialog
-                // had nothing to click: the only way out was Esc or the close
-                // cross, and the only way to save was Enter.
-                .footer(
-                    DialogFooter::new()
-                        .child(
-                            Button::new("cancel-connection")
-                                .label("取消")
-                                .outline()
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
-                        )
-                        .child(
-                            Button::new("save-connection")
-                                .label("保存")
-                                .primary()
-                                .on_click(move |_, window, cx| {
-                                    let done = on_save
-                                        .update(cx, |workspace, cx| workspace.save_form(window, cx))
-                                        .unwrap_or(false);
-                                    // False means the form rejected the input and
-                                    // said so; leaving the dialog open keeps what
-                                    // was typed.
-                                    if done {
-                                        window.close_dialog(cx);
-                                    }
-                                }),
-                        ),
-                )
-                // Enter goes through the same check, and the framework closes
-                // the dialog when it returns true.
-                .on_ok(move |_, window, cx| {
-                    on_enter
-                        .update(cx, |workspace, cx| workspace.save_form(window, cx))
+                // False keeps the dialog open: the form has already said what
+                // was wrong, and the input is still in it.
+                .confirm_cancel("保存", "取消", move |window, cx| {
+                    this.update(cx, |workspace, cx| workspace.save_form(window, cx))
                         .unwrap_or(false)
                 })
         });

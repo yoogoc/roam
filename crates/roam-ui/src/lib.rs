@@ -8,6 +8,7 @@ mod assets;
 mod browser;
 mod connection_form;
 mod delegate;
+mod dialog;
 mod dir_tree;
 mod name_dialog;
 pub mod placeholders;

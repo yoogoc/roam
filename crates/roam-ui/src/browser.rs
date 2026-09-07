@@ -8,8 +8,7 @@ use gpui::{
     IntoElement, ParentElement, Render, SharedString, Styled, Subscription, Task, Window, div,
     prelude::FluentBuilder, px,
 };
-use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
-use gpui_component::dialog::DialogButtonProps;
+use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::table::{DataTable, TableEvent, TableState};
 use gpui_component::{
@@ -29,6 +28,7 @@ use crate::actions::{
     NewFolder, OpenSelected, Reload, ToggleHidden, TogglePreview,
 };
 use crate::delegate::EntriesDelegate;
+use crate::dialog::DialogButtons;
 use crate::name_dialog::NameDialog;
 use crate::placeholders;
 use crate::preview::PreviewPanel;
@@ -706,14 +706,8 @@ impl Browser {
             builder
                 .title("新建文件夹")
                 .w(px(420.))
-                .button_props(
-                    DialogButtonProps::default()
-                        .ok_text("创建")
-                        .cancel_text("取消")
-                        .show_cancel(true),
-                )
                 .child(Input::new(&dialog.input))
-                .on_ok(move |_, window, cx| {
+                .confirm_cancel("创建", "取消", move |window, cx| {
                     let name = dialog.value(cx);
 
                     this.update(cx, |browser, cx| {
@@ -756,14 +750,8 @@ impl Browser {
             builder
                 .title(title.clone())
                 .w(px(420.))
-                .button_props(
-                    DialogButtonProps::default()
-                        .ok_text("重命名")
-                        .cancel_text("取消")
-                        .show_cancel(true),
-                )
                 .child(Input::new(&dialog.input))
-                .on_ok(move |_, window, cx| {
+                .confirm_cancel("重命名", "取消", move |window, cx| {
                     let name = dialog.value(cx);
 
                     this.update(cx, |browser, cx| {
@@ -952,12 +940,8 @@ impl Browser {
             builder
                 .title(title.clone())
                 .w(px(560.))
-                .button_props(
-                    DialogButtonProps::default()
-                        .cancel_text("关闭")
-                        .show_cancel(true),
-                )
                 .child(render_versions(&versions, &entry, this))
+                .dismiss("关闭")
         });
     }
 
@@ -998,20 +982,15 @@ impl Browser {
             builder
                 .title(title.clone())
                 .w(px(440.))
-                // `confirm()` used to bundle these three. Deleting is the one
-                // irreversible action here, so it keeps them: no dismissing by
-                // clicking the backdrop, and no bare X that reads as "cancel".
+                // Deleting is the one irreversible action in the menu, so it
+                // asks properly: no dismissing by clicking the backdrop, and no
+                // bare X that reads as "cancel". Which is also why this dialog
+                // was the worst of the ones with no buttons — it left Escape as
+                // the only way out.
                 .overlay_closable(false)
                 .close_button(false)
-                .button_props(
-                    DialogButtonProps::default()
-                        .ok_text("删除")
-                        .ok_variant(ButtonVariant::Danger)
-                        .cancel_text("取消")
-                        .show_cancel(true),
-                )
                 .child(div().text_sm().child(body.clone()))
-                .on_ok(move |_, window, cx| {
+                .danger_cancel("删除", "取消", move |window, cx| {
                     this.update(cx, |browser, cx| browser.delete_entry(&entry, window, cx))
                         .is_ok()
                 })
