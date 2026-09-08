@@ -37,12 +37,12 @@ boundary through `roam_core::rt::Rt::spawn`. See `docs/DESIGN.md` §2.
 ## Tests
 
 ```
-cargo test -p roam-core         # 261 pass
+cargo test -p roam-core         # 262 pass
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
-`roam-core` carries 261 tests: 201 unit, 48 backend integration tests that report
+`roam-core` carries 262 tests: 202 unit, 48 backend integration tests that report
 success by skipping when no server is configured (`scripts/test-backends.sh` is
 what makes them run for real), and 12 scale tests.
 

@@ -84,6 +84,24 @@ pub const ONE_SHOT_LIMIT: u64 = 512 * 1024 * 1024;
 /// of entries the UI has not drawn yet.
 const CHANNEL_DEPTH: usize = 8;
 
+/// Deadline for a control operation — `stat`, `delete`, `presign`. These are one
+/// small request, so a slow one means a sick connection, not a big file.
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Deadline for a *single* IO call: one `Writer::write`, one read from a body,
+/// one page from a lister. It is not a budget for the whole transfer.
+///
+/// This is the one that has to be set explicitly, and the reason uploads to S3
+/// used to fail with "io operation timeout reached": `TimeoutLayer::with_timeout`
+/// only moves [`CONTROL_TIMEOUT`], leaving IO on its 10-second default. A
+/// [`CHUNK`]-sized part with [`WRITER_CONCURRENCY`] of them in flight needs the
+/// link to sustain ~54 Mbps to finish one in ten seconds, so any ordinary home
+/// connection timed out partway through a file.
+///
+/// The arithmetic is pinned by a test below; the value is meant to catch a
+/// stalled connection, not a slow one.
+const IO_TIMEOUT: Duration = Duration::from_secs(120);
+
 #[derive(Clone)]
 pub struct Vfs {
     inner: Arc<VfsInner>,
@@ -162,9 +180,19 @@ impl Vfs {
         }
 
         // `from_uri` takes a single argument; options ride along as a tuple.
+        //
+        // Layer order is load-bearing: a layer added later wraps the ones before
+        // it, and the timeout has to sit *under* the retry. OpenDAL says why —
+        // a timeout on the outside drops the retry layer's future mid-flight and
+        // leaves its body state broken, and a timed-out request is never retried
+        // at all, which is the opposite of what a retry layer is for.
         let op = Operator::from_uri((profile.uri.as_str(), options))?
+            .layer(
+                TimeoutLayer::new()
+                    .with_timeout(CONTROL_TIMEOUT)
+                    .with_io_timeout(IO_TIMEOUT),
+            )
             .layer(RetryLayer::new().with_max_times(3).with_jitter())
-            .layer(TimeoutLayer::new().with_timeout(Duration::from_secs(30)))
             .layer(ConcurrentLimitLayer::new(32));
 
         Ok(Self::from_operator(rt, op, &profile.name))
@@ -1059,6 +1087,31 @@ impl Drop for Listing {
 mod tests {
     use super::*;
     use crate::EntryKind;
+
+    /// The bug this pins: `TimeoutLayer::with_timeout` does not touch the IO
+    /// budget, so uploads ran on the library's 10-second default — one 8 MiB
+    /// part per ten seconds, eight of them at once, which no ordinary uplink
+    /// can hold. It failed with "io operation timeout reached" partway through
+    /// a file, and the message said nothing about a timeout being *ours*.
+    ///
+    /// The budget bounds one `Writer::write` while `WRITER_CONCURRENCY` of them
+    /// are in flight, so this is the link speed an upload needs just to stay
+    /// alive. Keep it under something an ordinary connection beats — raising
+    /// `CHUNK` or the concurrency without raising the timeout brings the bug
+    /// straight back.
+    #[test]
+    fn the_io_timeout_is_not_secretly_a_bandwidth_requirement() {
+        let bits = (CHUNK * WRITER_CONCURRENCY * 8) as f64;
+        let mbps = bits / IO_TIMEOUT.as_secs_f64() / 1_000_000.0;
+
+        assert!(
+            mbps <= 5.0,
+            "an upload now needs {mbps:.1} Mbps sustained just to avoid timing out"
+        );
+        // And the other direction: a budget so long that a dead connection sits
+        // there for ten minutes is not a timeout.
+        assert!(IO_TIMEOUT <= Duration::from_secs(300), "too slow to fail");
+    }
 
     fn fixture() -> (tempfile::TempDir, Vfs) {
         let dir = tempfile::tempdir().unwrap();

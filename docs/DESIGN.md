@@ -179,10 +179,18 @@ M2 实测的差异（用 fake 凭据构建 Operator，不发网络请求即可�
 ```rust
 // 注意 from_uri 只接受一个参数：options 以元组形式随 uri 一起传入。
 let op = Operator::from_uri((profile.uri.as_str(), options))?
+    .layer(
+        TimeoutLayer::new()
+            .with_timeout(CONTROL_TIMEOUT)   // 30s，stat / delete / presign
+            .with_io_timeout(IO_TIMEOUT),    // 120s，单次 read / write / 列举翻页
+    )
     .layer(RetryLayer::new().with_max_times(3).with_jitter())
-    .layer(TimeoutLayer::new().with_timeout(Duration::from_secs(30)))
     .layer(ConcurrentLimitLayer::new(32));
 ```
+
+> **`with_timeout` 不管 IO。** 这是上传到 S3 报 `io operation timeout reached` 的原因：`TimeoutLayer` 有两个预算，`with_timeout` 只动控制类操作那个，IO 那个不设就停在库的默认值 **10 秒**——而它约束的是**每一次** `Writer::write`。上传是 `chunk(8 MiB).concurrent(8)`，8 个分片同时在飞、每个都要在 10 秒内传完，等于要求上行持续 54 Mbps，家宽必然中途失败。`IO_TIMEOUT` 现在显式设成 120 秒（同样的算术要求约 4.3 Mbps，由 `the_io_timeout_is_not_secretly_a_bandwidth_requirement` 守着——改 `CHUNK` 或并发数而不改它，这个 bug 会原样回来）。
+>
+> **层序是有意义的：后加的层包在外面，超时必须在重试的里面。** OpenDAL 自己写明了原因：超时在外面会把重试层的 future 在飞行中丢掉、破坏它的 body 状态，而且超时失败的请求根本轮不到重试——这跟加重试层的目的正好相反。原来的写法（先 Retry 后 Timeout）就是被点名的那一种。
 
 > **没有 `.finish()`**：0.58 的 `Operator::new` / `from_uri` 直接返回 `Operator`，`.layer()` 也返回 `Operator`。旧版那套 `OperatorBuilder` + `.finish()` 的写法不再适用。
 >
