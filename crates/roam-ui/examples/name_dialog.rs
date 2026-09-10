@@ -8,8 +8,8 @@
 //!
 //!     cargo run -p roam-ui --example name_dialog
 
-use gpui::{AnyView, App, AppContext, Bounds, Window, WindowBounds, WindowOptions, px, size};
-use gpui_component::Root;
+use gpui_kit::component::Root;
+use gpui_kit::{AnyView, App, AppContext, Bounds, Window, WindowBounds, WindowOptions, px, size};
 use roam_core::transfer::DEFAULT_CONCURRENCY;
 use roam_core::{Rt, TransferEngine, Vfs};
 use roam_ui::{Assets, Browser};
@@ -20,10 +20,10 @@ fn main() {
     let vfs = Vfs::local(rt.clone(), temp.to_str().unwrap()).expect("local session");
     let engine = TransferEngine::new(rt, DEFAULT_CONCURRENCY);
 
-    gpui_platform::application()
+    gpui_kit::application()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
-            gpui_component::init(cx);
+            gpui_kit::init(cx);
             // Installs the keyboard bindings; without it every shortcut is inert.
             roam_ui::init(cx);
 

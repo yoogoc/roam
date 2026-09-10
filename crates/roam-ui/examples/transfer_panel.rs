@@ -10,8 +10,8 @@
 
 use std::sync::Arc;
 
-use gpui::{AnyView, App, AppContext, Bounds, Window, WindowBounds, WindowOptions, px, size};
-use gpui_component::Root;
+use gpui_kit::component::Root;
+use gpui_kit::{AnyView, App, AppContext, Bounds, Window, WindowBounds, WindowOptions, px, size};
 use roam_core::transfer::{DEFAULT_CONCURRENCY, Transfer};
 use roam_core::{Rt, TransferEngine, Vfs};
 use roam_ui::{Assets, TransferPanel};
@@ -49,10 +49,10 @@ fn main() {
     // Keep the temp dirs alive for the life of the process.
     let _keep = (target, source);
 
-    gpui_platform::application()
+    gpui_kit::application()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
-            gpui_component::init(cx);
+            gpui_kit::init(cx);
             // Installs the keyboard bindings; without it every shortcut is inert.
             roam_ui::init(cx);
 

@@ -1,7 +1,7 @@
 # Roam
 
-A cross-backend desktop file browser. Local disk, S3, GCS, Azure Blob, WebDAV and
-SFTP (macOS and Linux) through one window, built on [OpenDAL] and [GPUI].
+A cross-backend desktop file browser. Local disk, S3, GCS, Azure Blob and WebDAV
+through one window, built on [OpenDAL] and [GPUI Kit].
 
 ```
 cargo run                 # browse $HOME
@@ -15,9 +15,12 @@ for permission on every launch — but it means the file is not safe to sync,
 commit, or paste into an issue, and anyone who can read it has the credentials.
 
 Connections are entered through a form generated per backend: pick S3, GCS, Azure
-Blob, WebDAV, SFTP or local disk and it asks for that service's fields, masks the
+Blob, WebDAV or local disk and it asks for that service's fields, masks the
 secret ones, and composes the OpenDAL URI itself. The picker lists what the build
-actually has, so SFTP is absent on Windows.
+supports, with the same five connection types on every platform.
+
+SFTP has been removed. Existing SFTP profiles remain readable and removable, but
+cannot connect or be edited. Other saved connections continue to work.
 
 ## Layout
 
@@ -37,26 +40,24 @@ boundary through `roam_core::rt::Rt::spawn`. See `docs/DESIGN.md` §2.
 ## Tests
 
 ```
-cargo test -p roam-core         # 262 pass
-cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo fmt --all --check
 ```
 
-`roam-core` carries 262 tests: 202 unit, 48 backend integration tests that report
-success by skipping when no server is configured (`scripts/test-backends.sh` is
-what makes them run for real), and 12 scale tests.
+`roam-core` carries 199 unit tests, 40 backend integration tests and 12 scale tests.
+Protocol tests skip when no server is configured; `scripts/test-backends.sh`
+runs them against local servers. The UI suite has 112 tests (including two that
+require MinIO), and macOS CI now enforces their results.
 
-> **`cargo test -p roam-ui` currently fails on macOS — 78 of its 111 tests.** Not
-> our code: `Root::new` installs a macOS accessibility hook that needs a real
-> `NSView`, and gpui's test window answers with `unimplemented!()` instead of the
-> `Err` its trait allows. Every test that builds a `Root` panics. The app itself is
-> unaffected — a real window has a real view. See `docs/DESIGN.md` for the full
-> chain and why there is no fix on our side short of forking a dependency.
+GUI dependencies come from `gpui-kit 0.6.1`, with exact resolved versions recorded
+in `Cargo.lock`. Test harnesses enable `test-support` and permit real Tokio IO
+wakeups. The old macOS `Root` initialization failure is resolved with this stack.
 
-The view tests, when they can run, drive real GPUI views with `TestAppContext` and
+The view tests drive real GPUI views with `TestAppContext` and
 dispatch real keystrokes. They also rasterise every icon the views name, with the
 same `resvg` gpui uses, and assert each one puts ink on the page. Upstream ships
-the icons now (`gpui-component-assets`), but an application that registers no
+the icons now (`gpui_kit::assets::Assets`), but an application that registers no
 asset source still gets *nothing drawn*, silently, so the check stays.
 
 Two things it cannot cover, so both have their own path:
@@ -66,8 +67,8 @@ which never touches the network. The integration tests run against real servers
 in Docker:
 
 ```
-scripts/test-backends.sh test all     # start the servers, run 47 integration tests
-scripts/test-backends.sh test s3      # or just one: s3 | azblob | gcs | webdav | sftp
+scripts/test-backends.sh test all     # start the servers, run backend integration tests
+scripts/test-backends.sh test s3      # or just one: s3 | azblob | gcs | webdav
 scripts/test-backends.sh down         # stop and clean up
 ```
 
@@ -124,19 +125,10 @@ filtering · light and dark themes.
   integration tests too, since every server they need is a Linux container.
 - **ui (macOS)** — the view layer needs gpui, so it runs where the app ships.
 
-The `core` job has been **executed on a real Linux runner** with `act`, and it
-passes end to end: fmt, clippy, 163 + 22 + 23 + 7 offline tests, all five backend
-servers, 23 S3 and 22 azblob/gcs/webdav/sftp integration tests, the 100k-entry
-scale test, and the `if: always()` teardown. That is also what verifies the claim
-this split rests on — `roam-core` really does build and test on Linux with no
-graphics stack.
-
-Running it there found three bugs in `scripts/test-backends.sh` that were
-invisible locally, all one root cause: `docker run -v` resolves the source path in
-the **daemon's** filesystem, not the step's. Those are the same path only when the
-step runs directly on the host. Inside a container the mount silently delivers an
-empty directory — so the sftp public key, the MinIO bucket and the fake-gcs bucket
-all have to be created through an API rather than by writing to a mounted path.
+The `core` job runs offline tests and tests against four local protocol servers:
+MinIO, Azurite, fake-gcs-server and Apache WebDAV. The server fixtures use APIs to
+create buckets, so they also work when the CI step runs inside a container and
+Docker bind mounts resolve on a different host.
 
 ```
 act -j core -P ubuntu-latest=catthehacker/ubuntu:act-latest
@@ -152,14 +144,10 @@ cargo packager -p roam --release --formats app,dmg
 One config in `crates/roam/Cargo.toml` covers every platform's formats — `.app` and
 `.dmg`, `.deb` and `.AppImage`, `.msi` and the NSIS installer.
 
-The app is signed with the hardened runtime and **not** sandboxed, which is not a
-preference: the sftp backend spawns the system `ssh`, and App Sandbox forbids that.
-Measured rather than assumed — with the sandbox entitlement the same bundle fails
-with `Operation not permitted`, without it the same test passes. So the Mac App
-Store is not a channel for this app while sftp exists. `docs/PACKAGING.md` has the
-rest: what notarization needs, the two environment traps (a SOCKS proxy breaks the
-DMG step; there is no LICENSE file yet), and what stands between here and Linux or
-Windows.
+The packaging configuration uses the hardened runtime without App Sandbox.
+Removing SFTP also removes the external SSH executable requirement. App Sandbox
+and App Store distribution have not been validated; the existing distribution
+configuration is retained. See `docs/PACKAGING.md` for signing and packaging.
 
 ## What is not verified
 
@@ -168,8 +156,6 @@ Windows.
   consistency need actual accounts.
 - **GCS large objects.** OpenDAL's concurrent GCS writer uses the XML multipart
   endpoint, which `fake-gcs-server` answers with 404.
-- **Screenshots.** `screencapture` is blocked on the development machine, so the
-  UI is verified by running it, not by looking at it.
 - **Notarization and Gatekeeper.** Packaging is verified up to a working, ad-hoc
   signed `Roam.app` and `.dmg` that launch. Notarizing needs a Developer ID
   Application certificate, which this machine does not have — so "double-clicks on
@@ -180,11 +166,5 @@ Windows.
   image, and substituting Linux would pass gpui tests that could never run there.
   Its commands are run directly on macOS instead — the same OS as the runner.
 
-`sftp` stands apart from the rest: it drives the system `ssh` binary, so it needs
-one in `PATH` and its key must be a file on disk rather than a keychain entry.
-That also makes it **macOS and Linux only** — the `openssh` crate underneath it
-does not build for Windows, so a Windows build leaves the backend out entirely and
-the connection form does not offer it.
-
 [OpenDAL]: https://opendal.apache.org
-[GPUI]: https://gpui.rs
+[GPUI Kit]: https://github.com/longbridge/gpui-kit

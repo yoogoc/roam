@@ -11,8 +11,6 @@ use tokio::task::JoinHandle;
 
 use crate::menu::{self, MenuItem};
 use crate::profile::Profile;
-#[cfg(not(windows))]
-use crate::sftp_auth;
 use crate::transfer::{CHUNK, TaskProgress, WRITER_CONCURRENCY};
 use crate::{DirEntry, Error, ObjectVersion, Result, Rt, path};
 
@@ -142,42 +140,12 @@ impl Vfs {
 
     /// Build a session from a saved profile.
     pub fn from_profile(rt: Rt, profile: &Profile) -> Result<Self> {
-        // Only the sftp branch below mutates it, and that branch is Unix-only.
-        #[cfg_attr(windows, allow(unused_mut))]
-        let mut options = profile.connect_options()?;
-
-        // A profile written on another platform, or carried over in a synced
-        // config. OpenDAL would refuse the URI anyway, but with "unsupported
-        // scheme" rather than the reason — and the reason is not something the
-        // user can fix.
-        #[cfg(windows)]
-        if profile.scheme() == "sftp" {
+        if profile.scheme().eq_ignore_ascii_case("sftp") {
             return Err(Error::Unsupported(
-                "Windows 版不支持 SFTP：该后端要调用系统 ssh，依赖的库只在 Unix 上可用".into(),
+                "SFTP 连接类型已移除，请删除该旧连接并使用其他受支持的类型".into(),
             ));
         }
-
-        // sftp passwords do not go to OpenDAL — it has no option for one, and
-        // handing it a key it does not know is not something to rely on. They go
-        // to `ssh` instead, through the helper described in `sftp_auth`.
-        #[cfg(not(windows))]
-        if profile.scheme() == "sftp"
-            && let Some(ix) = options.iter().position(|(key, _)| key == "password")
-        {
-            let (_, password) = options.remove(ix);
-            let user = options
-                .iter()
-                .find(|(key, _)| key == "user")
-                .map(|(_, value)| value.as_str())
-                .unwrap_or("");
-            let endpoint = options
-                .iter()
-                .find(|(key, _)| key == "endpoint")
-                .map(|(_, value)| value.as_str())
-                .unwrap_or("");
-
-            sftp_auth::install(user, endpoint, &password)?;
-        }
+        let options = profile.connect_options()?;
 
         // `from_uri` takes a single argument; options ride along as a tuple.
         //
@@ -1249,6 +1217,16 @@ mod tests {
         // The abort is observable rather than merely assumed.
         tokio::task::yield_now().await;
         assert!(task.is_finished());
+    }
+
+    #[tokio::test]
+    async fn removed_sftp_profiles_fail_before_connecting() {
+        for uri in ["sftp:///upload", "SFTP:///upload"] {
+            let profile = crate::Profile::new("old", "Old connection", uri);
+            let error = Vfs::from_profile(Rt::from_current().unwrap(), &profile).unwrap_err();
+            assert!(matches!(error, Error::Unsupported(_)));
+            assert!(error.full_message().contains("SFTP 连接类型已移除"));
+        }
     }
 
     #[tokio::test]

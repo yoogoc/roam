@@ -159,16 +159,16 @@ mod tests {
 
     #[test]
     fn a_headline_error_still_carries_the_backend_s_own_words() {
-        let err: Error = opendal::Error::new(ErrorKind::PermissionDenied, "publickey denied")
+        let err: Error = opendal::Error::new(ErrorKind::PermissionDenied, "access denied")
             .with_operation("list")
-            .with_context("service", "sftp")
+            .with_context("service", "webdav")
             .into();
 
         // The headline stays short, and the reason lives beside it rather than
         // being thrown away.
         assert_eq!(err.user_message(), "没有访问权限");
-        assert_eq!(err.detail().as_deref(), Some("publickey denied"));
-        assert_eq!(err.full_message(), "没有访问权限：publickey denied");
+        assert_eq!(err.detail().as_deref(), Some("access denied"));
+        assert_eq!(err.full_message(), "没有访问权限：access denied");
 
         // opendal's `kind (status) at operation, context { … }` preamble is
         // noise for someone reading a banner.

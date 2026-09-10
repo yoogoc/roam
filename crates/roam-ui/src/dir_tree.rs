@@ -1,24 +1,24 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::{
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{ActiveTheme, Icon, IconName, h_flex};
+use gpui_kit::{
     AnyElement, ClickEvent, Context, InteractiveElement, IntoElement, ParentElement, Render,
     StatefulInteractiveElement, Styled, Task, Window, div, prelude::FluentBuilder, px,
     uniform_list,
 };
-use gpui_component::tooltip::Tooltip;
-use gpui_component::{ActiveTheme, Icon, IconName, h_flex};
 use roam_core::{DirTree, TreeRow, Vfs};
 
 /// Every row is this tall, which is what lets the list virtualize: a
 /// `uniform_list` has to know an item's height without building it.
-const ROW_HEIGHT: gpui::Pixels = px(22.);
+const ROW_HEIGHT: gpui_kit::Pixels = px(22.);
 
 /// The tallest the sidebar tree gets before it scrolls.
-const PANEL_HEIGHT: gpui::Pixels = px(260.);
+const PANEL_HEIGHT: gpui_kit::Pixels = px(260.);
 
 /// The list's viewport: the rows it has, capped.
-fn visible_height(rows: usize) -> gpui::Pixels {
+fn visible_height(rows: usize) -> gpui_kit::Pixels {
     let wanted = ROW_HEIGHT * (rows.max(1) as f32);
     if wanted < PANEL_HEIGHT {
         wanted
@@ -52,7 +52,7 @@ fn may_truncate(label: &str, depth: usize) -> bool {
 }
 
 /// Called when a row is clicked, so navigation stays in the workspace.
-pub type NavigateHandler = Rc<dyn Fn(Arc<str>, &mut Window, &mut gpui::App)>;
+pub type NavigateHandler = Rc<dyn Fn(Arc<str>, &mut Window, &mut gpui_kit::App)>;
 
 /// The sidebar's directory tree.
 ///
@@ -91,7 +91,7 @@ impl DirTreeView {
 
     pub fn on_navigate(
         &mut self,
-        handler: impl Fn(Arc<str>, &mut Window, &mut gpui::App) + 'static,
+        handler: impl Fn(Arc<str>, &mut Window, &mut gpui_kit::App) + 'static,
     ) {
         self.on_navigate = Some(Rc::new(handler));
     }
@@ -334,10 +334,8 @@ impl DirTreeView {
     /// Builds the view around an already-populated tree, without listing
     /// anything.
     ///
-    /// Every other path here goes through `load`, which does its work on the
-    /// tokio runtime — and zed's test scheduler now fails any gpui test that sees
-    /// activity on another thread ("Your test is not deterministic"). Nothing is
-    /// loaded here, so nothing runs off-thread and the assertions stay honest.
+    /// These layout and click tests need a fixed tree. IO-backed tree behavior
+    /// is covered by the Workspace harness, which permits real Tokio wakeups.
     pub(crate) fn with_tree_for_test(vfs: Vfs, tree: DirTree) -> Self {
         let mut this = Self {
             vfs,
@@ -359,7 +357,7 @@ impl DirTreeView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{AppContext as _, TestAppContext};
+    use gpui_kit::{AppContext as _, TestAppContext};
     use roam_core::Rt;
 
     fn tree_with(children: &[(&str, &[&str])]) -> DirTree {
@@ -375,7 +373,7 @@ mod tests {
         tree
     }
 
-    fn view(cx: &mut TestAppContext, tree: DirTree) -> gpui::Entity<DirTreeView> {
+    fn view(cx: &mut TestAppContext, tree: DirTree) -> gpui_kit::Entity<DirTreeView> {
         // A Vfs is needed to construct the view but never used: nothing here
         // lists, so the directory can go away again immediately. Creating the
         // runtime does not run anything on it.
@@ -385,7 +383,7 @@ mod tests {
         cx.update(|cx| cx.new(|_| DirTreeView::with_tree_for_test(vfs, tree)))
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn the_cache_equals_a_fresh_walk(cx: &mut TestAppContext) {
         let tree = tree_with(&[("", &["alpha/", "beta/"])]);
         let view = view(cx, tree);
@@ -398,7 +396,7 @@ mod tests {
         });
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn expanding_refreshes_the_cache(cx: &mut TestAppContext) {
         // Children already known, so toggling expands without listing.
         let tree = tree_with(&[("", &["alpha/"]), ("alpha/", &["alpha/nested/"])]);
@@ -421,7 +419,7 @@ mod tests {
         });
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn showing_hidden_directories_refreshes_the_cache(cx: &mut TestAppContext) {
         let tree = tree_with(&[("", &[".git/", "alpha/"])]);
         let view = view(cx, tree);
@@ -448,7 +446,7 @@ mod tests {
     /// The reason the cache exists: rendering must not depend on how big the tree
     /// is. Ten thousand expanded directories still means one cached list, and the
     /// virtualized list only builds the rows in view.
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_large_tree_still_caches_exactly_once(cx: &mut TestAppContext) {
         let kids: Vec<String> = (0..10_000).map(|i| format!("dir-{i:05}/")).collect();
         let mut tree = DirTree::new();
@@ -496,7 +494,7 @@ mod height_tests {
 #[cfg(test)]
 mod click_tests {
     use super::*;
-    use gpui::{Modifiers, TestAppContext, VisualTestContext, point};
+    use gpui_kit::{Modifiers, TestAppContext, VisualTestContext, point};
     use std::cell::RefCell;
 
     /// A tree with `alpha/` loaded and collapsed, so its row draws a triangle.
@@ -509,7 +507,7 @@ mod click_tests {
 
     /// Where in the row the disclosure triangle sits: the list's own padding,
     /// plus the indent for `depth`, plus half a triangle.
-    fn twisty_at(depth: usize, row: usize) -> gpui::Point<gpui::Pixels> {
+    fn twisty_at(depth: usize, row: usize) -> gpui_kit::Point<gpui_kit::Pixels> {
         point(
             px(4. + 4. + depth as f32 * INDENT + 7.),
             ROW_HEIGHT * (row as f32 + 0.5),
@@ -517,25 +515,24 @@ mod click_tests {
     }
 
     /// A point on the name, well clear of the triangle.
-    fn label_at(row: usize) -> gpui::Point<gpui::Pixels> {
+    fn label_at(row: usize) -> gpui_kit::Point<gpui_kit::Pixels> {
         point(px(120.), ROW_HEIGHT * (row as f32 + 0.5))
     }
 
     /// Builds a window around the tree and reports every navigation it asks for.
     ///
-    /// Not the `Harness` in `workspace`: that one needs a `gpui_component::Root`,
-    /// which panics under the test platform on macOS.
+    /// A focused tree fixture: Workspace and its overlay layers are not needed.
     fn window(
         cx: &mut TestAppContext,
         tree: DirTree,
     ) -> (
-        gpui::Entity<DirTreeView>,
+        gpui_kit::Entity<DirTreeView>,
         Rc<RefCell<Vec<String>>>,
         VisualTestContext,
     ) {
         // The rows ask the theme for their colours; without this the first paint
         // panics looking for it.
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
 
         let dir = tempfile::tempdir().unwrap();
         let vfs = Vfs::local(roam_core::Rt::new().unwrap(), dir.path().to_str().unwrap()).unwrap();
@@ -554,7 +551,7 @@ mod click_tests {
         (view, navigated, visual)
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn the_disclosure_triangle_expands_without_navigating(cx: &mut TestAppContext) {
         let (view, navigated, mut cx) = window(cx, tree_with_a_collapsed_child());
 
@@ -573,7 +570,7 @@ mod click_tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn clicking_the_name_navigates(cx: &mut TestAppContext) {
         let (view, navigated, mut cx) = window(cx, tree_with_a_collapsed_child());
 

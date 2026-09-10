@@ -1,5 +1,5 @@
-use gpui::{App, AppContext, Entity, Window};
-use gpui_component::input::InputState;
+use gpui_kit::component::input::InputState;
+use gpui_kit::{App, AppContext, Entity, Window};
 
 /// A single-field prompt for a new folder name or a rename.
 pub struct NameDialog {

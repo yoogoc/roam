@@ -1,16 +1,16 @@
 use std::sync::Arc;
 
-use gpui::{
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::tab::{Tab, TabBar};
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{
+    ActiveTheme, Disableable, Icon, IconName, Root, Sizable, Theme, ThemeMode, WindowExt, h_flex,
+    v_flex,
+};
+use gpui_kit::{
     AnyElement, AppContext, ClickEvent, Context, Entity, InteractiveElement, IntoElement,
     ParentElement, Pixels, Render, SharedString, StatefulInteractiveElement, Styled, Window, div,
     prelude::FluentBuilder, px,
-};
-use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::tab::{Tab, TabBar};
-use gpui_component::tooltip::Tooltip;
-use gpui_component::{
-    ActiveTheme, Disableable, Icon, IconName, Root, Sizable, Theme, ThemeMode, WindowExt, h_flex,
-    v_flex,
 };
 use roam_core::transfer::DEFAULT_CONCURRENCY;
 use roam_core::{Error, Profile, ProfileId, ProfileStore, Rt, TransferEngine, Vfs};
@@ -374,6 +374,16 @@ impl Workspace {
     }
 
     fn open_form(&mut self, editing: Option<Profile>, window: &mut Window, cx: &mut Context<Self>) {
+        if editing
+            .as_ref()
+            .is_some_and(|p| p.scheme().eq_ignore_ascii_case("sftp"))
+        {
+            window.push_notification(
+                "SFTP 连接类型已移除，请删除该旧连接并新建其他类型的连接",
+                cx,
+            );
+            return;
+        }
         let form = cx.new(|cx| match &editing {
             Some(profile) => ConnectionForm::editing(profile, window, cx),
             None => ConnectionForm::new(window, cx),
@@ -902,7 +912,7 @@ fn dialog_max_height(viewport_height: Pixels) -> Pixels {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use gpui::{TestAppContext, VisualTestContext};
+    use gpui_kit::{TestAppContext, VisualTestContext};
     use std::cell::RefCell;
     use std::path::PathBuf;
     use std::rc::Rc;
@@ -920,6 +930,9 @@ pub(crate) mod tests {
 
     impl Harness {
         pub(crate) fn new(cx: &mut TestAppContext) -> Self {
+            // These integration tests intentionally use the real Tokio IO runtime.
+            // Permit its worker threads to wake GPUI tasks through the public test API.
+            cx.background_executor.allow_parking();
             let local_dir = tempfile::tempdir().unwrap();
             std::fs::write(local_dir.path().join("local-only.txt"), b"local").unwrap();
 
@@ -931,13 +944,13 @@ pub(crate) mod tests {
             let config_dir = tempfile::tempdir().unwrap();
             let config_path = config_dir.path().join("profiles.toml");
 
-            cx.update(gpui_component::init);
+            cx.update(gpui_kit::init);
 
             let rt = Rt::new().unwrap();
             let local = Vfs::local(rt.clone(), local_dir.path().to_str().unwrap()).unwrap();
             let store = Arc::new(ProfileStore::at(&config_path));
 
-            // The window root must be a `gpui_component::Root`, exactly as in
+            // The window root must be a `gpui_kit::component::Root`, exactly as in
             // main.rs: `window.push_notification` and the dialog layer both
             // reach for it and panic otherwise. Wrapping here keeps the tests
             // exercising the same arrangement the app ships.
@@ -947,7 +960,7 @@ pub(crate) mod tests {
                 cx.add_window(move |window, cx| {
                     let workspace = cx.new(|cx| Workspace::new(rt, store, local, window, cx));
                     *holder.borrow_mut() = Some(workspace.clone());
-                    Root::new(gpui::AnyView::from(workspace), window, cx)
+                    Root::new(gpui_kit::AnyView::from(workspace), window, cx)
                 })
             };
             let workspace = holder.borrow().clone().expect("workspace was built");
@@ -1196,7 +1209,39 @@ pub(crate) mod tests {
         }
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
+    fn removed_sftp_profiles_can_be_deleted_without_affecting_other_connections(
+        cx: &mut TestAppContext,
+    ) {
+        let mut h = Harness::new(cx);
+        let old = Profile::new("old-sftp", "Old SFTP", "sftp:///upload");
+        h.add_profile(old.clone());
+        let remote = h.add_remote_profile();
+        let store = ProfileStore::at(&h.config_path);
+        store.save(&[old.clone(), remote.clone()]).unwrap();
+        assert_eq!(store.load().unwrap().len(), 2);
+
+        h.connect(&old.id);
+        assert_eq!(h.active(), None);
+        assert!(h.error_message().unwrap().contains("SFTP 连接类型已移除"));
+        assert_eq!(h.rows(), vec!["local-only.txt"]);
+        let workspace = h.workspace.clone();
+        h.cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.open_form(Some(old.clone()), window, cx);
+                assert!(
+                    w.form.is_none(),
+                    "an old profile must not turn into a local form"
+                );
+            });
+        });
+        h.remove_profile(&old.id);
+        assert_eq!(store.load().unwrap(), vec![remote.clone()]);
+        h.connect(&remote.id);
+        assert_eq!(h.rows(), vec!["remote-only.txt"]);
+    }
+
+    #[gpui_kit::test]
     fn opens_on_the_local_session(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -1204,7 +1249,7 @@ pub(crate) mod tests {
         assert_eq!(h.rows(), vec!["local-only.txt"]);
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_missing_profiles_file_is_not_an_error(cx: &mut TestAppContext) {
         let h = Harness::new(cx);
 
@@ -1227,7 +1272,7 @@ pub(crate) mod tests {
         }
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn connecting_a_profile_switches_the_backend(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         h.add_remote_profile();
@@ -1250,7 +1295,7 @@ pub(crate) mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn switching_sessions_does_not_leak_the_previous_listing(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         h.add_remote_profile();
@@ -1267,10 +1312,10 @@ pub(crate) mod tests {
         assert_eq!(h.active(), None);
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_profile_missing_a_required_field_blocks_the_switch(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
-        // An S3 profile with no keys. The schema knows it cannot connect, so this
+        // An S3 profile without its required region cannot connect, so this
         // has to fail before the session changes rather than as a 403 later.
         h.add_profile(Profile::new("half", "半个连接", "s3://bucket/"));
 
@@ -1284,13 +1329,13 @@ pub(crate) mod tests {
             .read_with(&h.cx, |w, _| w.error.clone())
             .expect("an error should be reported");
         assert!(
-            err.user_message().contains("Access Key ID"),
+            err.user_message().contains("区域"),
             "got {}",
             err.user_message()
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn history_is_cleared_when_the_session_changes(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         std::fs::create_dir(h.remote_root.join("sub")).unwrap();
@@ -1314,7 +1359,7 @@ pub(crate) mod tests {
         assert!(!can_go_back, "history from the old session was discarded");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn saving_a_form_writes_the_profile_with_its_credential(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         let root = h.remote_root.to_str().unwrap().to_string();
@@ -1343,7 +1388,7 @@ pub(crate) mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_credential_is_saved_into_the_config_file(cx: &mut TestAppContext) {
         // The inverse of what this file used to assert. Worth an explicit test
         // rather than an absence: the credential really is on disk now, and a
@@ -1357,6 +1402,10 @@ pub(crate) mod tests {
                 form.choose_scheme("s3", window, cx);
                 form.set_name("S3", window, cx);
                 form.set_field("bucket", "my-bucket", window, cx);
+                form.set_field("region", "us-east-1", window, cx);
+                // Saving is under test; fail connection construction locally so
+                // this fixture never contacts AWS with its sample credentials.
+                form.set_field("endpoint", "http://[invalid", window, cx);
                 form.set_field("access_key_id", "AKIAEXAMPLE", window, cx);
                 form.set_field("secret_access_key", "TOP-SECRET", window, cx);
             });
@@ -1373,7 +1422,7 @@ pub(crate) mod tests {
         assert!(text.contains("s3://my-bucket/"), "got: {text}");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_missing_required_field_keeps_the_dialog_open(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -1384,7 +1433,7 @@ pub(crate) mod tests {
                 form.choose_scheme("s3", window, cx);
                 form.set_name("S3", window, cx);
                 form.set_field("bucket", "bucket", window, cx);
-                // No keys typed: the schema says S3 cannot connect without them.
+                // No region typed: this is required even when credentials are implicit.
             });
 
             workspace.update(cx, |w, cx| {
@@ -1402,7 +1451,7 @@ pub(crate) mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn switching_service_keeps_the_fields_both_share(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -1421,16 +1470,7 @@ pub(crate) mod tests {
 
                 // gcs has bucket and endpoint too, so retyping them would be
                 // the exact tedium this form removes.
-                let err = form
-                    .build(&[], cx)
-                    .expect_err("gcs still needs its own token");
-                assert!(
-                    err.user_message().contains("访问令牌"),
-                    "got {}",
-                    err.user_message()
-                );
-
-                form.set_field("token", "t", window, cx);
+                // GCS can use default credentials, so a token is optional.
                 let profile = form.build(&[], cx).unwrap();
                 assert_eq!(profile.uri, "gcs://shared/");
                 assert_eq!(
@@ -1443,7 +1483,7 @@ pub(crate) mod tests {
         });
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn editing_shows_the_stored_values_including_the_credential(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -1472,9 +1512,9 @@ pub(crate) mod tests {
 #[cfg(test)]
 mod tree_tests {
     use super::tests::*;
-    use gpui::TestAppContext;
+    use gpui_kit::TestAppContext;
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn the_tree_lists_the_root_on_open(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         h.settle_tree();
@@ -1483,7 +1523,7 @@ mod tree_tests {
         assert_eq!(h.tree_labels(), vec!["/"]);
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn only_directories_appear_in_the_tree(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         h.make_dirs(&["alpha", "beta"]);
@@ -1494,7 +1534,7 @@ mod tree_tests {
         assert_eq!(h.tree_labels(), vec!["/", "  alpha", "  beta"]);
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_child_directory_loads_only_when_expanded(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         h.make_dirs(&["alpha", "alpha/nested"]);
@@ -1508,7 +1548,7 @@ mod tree_tests {
         assert_eq!(h.tree_labels(), vec!["/", "  alpha", "    nested"]);
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn collapsing_hides_children_without_forgetting_them(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         h.make_dirs(&["alpha", "alpha/nested"]);
@@ -1526,7 +1566,7 @@ mod tree_tests {
         assert_eq!(h.tree_labels().len(), 3);
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn navigating_the_pane_reveals_the_directory_in_the_tree(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         h.make_dirs(&["alpha", "alpha/nested"]);
@@ -1539,7 +1579,7 @@ mod tree_tests {
         assert_eq!(h.tree_labels(), vec!["/", "  alpha", "    nested"]);
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn dot_directories_stay_out_of_the_tree(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         h.make_dirs(&[".git", "alpha"]);
@@ -1551,7 +1591,7 @@ mod tree_tests {
         assert_eq!(h.tree_labels(), vec!["/", "  alpha"]);
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn the_hidden_files_toggle_reaches_the_tree(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         h.make_dirs(&[".git", "alpha"]);
@@ -1567,7 +1607,7 @@ mod tree_tests {
         assert_eq!(h.tree_labels(), vec!["/", "  alpha"]);
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn navigating_into_a_dot_directory_still_reveals_it(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         h.make_dirs(&[".config", ".config/nvim"]);
@@ -1582,7 +1622,7 @@ mod tree_tests {
         assert_eq!(h.tree_labels(), vec!["/", "  .config", "    nvim"]);
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn switching_sessions_resets_the_tree(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         h.make_dirs(&["alpha"]);
@@ -1603,9 +1643,9 @@ mod tree_tests {
 #[cfg(test)]
 mod tab_tests {
     use super::tests::*;
-    use gpui::TestAppContext;
+    use gpui_kit::TestAppContext;
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_window_opens_with_one_tab(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -1613,7 +1653,7 @@ mod tab_tests {
         assert_eq!(h.active_tab_index(), 0);
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_new_tab_opens_where_you_already_are(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         h.make_dirs(&["alpha"]);
@@ -1630,7 +1670,7 @@ mod tab_tests {
         assert!(summaries[1].ends_with(":alpha/"), "got {summaries:?}");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn tabs_hold_independent_directories(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         h.make_dirs(&["alpha", "beta"]);
@@ -1646,7 +1686,7 @@ mod tab_tests {
         assert!(summaries[1].ends_with(":alpha/"), "got {summaries:?}");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn tabs_can_sit_on_different_backends(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         h.add_remote_profile();
@@ -1663,7 +1703,7 @@ mod tab_tests {
         assert_eq!(h.rows(), vec!["local-only.txt"]);
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn connecting_only_changes_the_active_tab(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         h.add_remote_profile();
@@ -1676,7 +1716,7 @@ mod tab_tests {
         assert!(summaries[1].starts_with("远端"), "got {summaries:?}");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn closing_a_tab_keeps_the_rest(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         h.new_tab();
@@ -1689,7 +1729,7 @@ mod tab_tests {
         assert_eq!(h.active_tab_index(), 1, "focus falls back to the neighbour");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn the_last_tab_cannot_be_closed(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -1699,7 +1739,7 @@ mod tab_tests {
         assert_eq!(h.tab_count(), 1);
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn switching_tabs_wraps_around(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         h.new_tab();
@@ -1712,7 +1752,7 @@ mod tab_tests {
         assert_eq!(h.active_tab_index(), 1);
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn the_sidebar_tree_follows_the_active_tab(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         h.make_dirs(&["alpha", "alpha/nested"]);
@@ -1728,7 +1768,7 @@ mod tab_tests {
         assert_eq!(labels[0], "/");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn deleting_a_profile_falls_every_tab_back_to_local(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         h.add_remote_profile();
@@ -1750,7 +1790,7 @@ mod s3_tests {
     //! real S3 server. Skipped unless `ROAM_S3_ENDPOINT` is set — see
     //! `roam-core/tests/s3.rs` for how to start one.
     use super::tests::*;
-    use gpui::TestAppContext;
+    use gpui_kit::TestAppContext;
     use roam_core::Profile;
 
     fn s3_profile() -> Option<Profile> {
@@ -1774,7 +1814,7 @@ mod s3_tests {
         Some(profile)
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn connecting_to_a_real_s3_server_lists_it(cx: &mut TestAppContext) {
         let Some(profile) = s3_profile() else {
             eprintln!("skipping: ROAM_S3_ENDPOINT is not set");
@@ -1797,7 +1837,7 @@ mod s3_tests {
         assert!(!rename, "and no native rename");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_wrong_secret_shows_the_credential_error_in_the_ui(cx: &mut TestAppContext) {
         let Some(profile) = s3_profile() else {
             eprintln!("skipping: ROAM_S3_ENDPOINT is not set");
@@ -1840,9 +1880,9 @@ mod s3_tests {
 mod version_tests {
     //! Version browsing through the UI, against a versioned bucket.
     use super::tests::*;
-    use gpui::TestAppContext;
+    use gpui_kit::TestAppContext;
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn the_menu_offers_version_history_on_a_versioned_backend(cx: &mut TestAppContext) {
         use roam_core::EntryAction;
 

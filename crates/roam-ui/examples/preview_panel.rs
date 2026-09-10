@@ -9,8 +9,8 @@
 //!
 //!     cargo run -p roam-ui --example preview_panel [path]
 
-use gpui::{AnyView, App, AppContext, Bounds, Window, WindowBounds, WindowOptions, px, size};
-use gpui_component::Root;
+use gpui_kit::component::Root;
+use gpui_kit::{AnyView, App, AppContext, Bounds, Window, WindowBounds, WindowOptions, px, size};
 use roam_core::{DirEntry, EntryKind, Rt, Vfs};
 use roam_ui::{Assets, PreviewPanel};
 
@@ -113,10 +113,10 @@ fn main() {
 
     let _keep = dir;
 
-    gpui_platform::application()
+    gpui_kit::application()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
-            gpui_component::init(cx);
+            gpui_kit::init(cx);
             roam_ui::init(cx);
 
             let bounds = Bounds::centered(None, size(px(420.), px(560.)), cx);

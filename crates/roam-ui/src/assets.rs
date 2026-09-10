@@ -15,17 +15,17 @@
 //! appears when the mouse passes over it".
 //!
 //! The icons used to be vendored here, 86 of them, because the published
-//! gpui-component shipped none. Upstream's git version does ship them
-//! (`gpui-component-assets`), so this is now a re-export — but the tests stay.
+//! gpui-component shipped none. GPUI Kit supplies the matching icon set through
+//! `gpui_kit::assets`, so this is a re-export — but the tests stay.
 //! Nothing checking was the reason the icons went missing in the first place, and
 //! that is just as true of someone else's asset crate as of our own.
 
-pub use gpui_component_assets::Assets;
+pub use gpui_kit::assets::Assets;
 
 #[cfg(test)]
 mod tests {
-    use gpui::AssetSource;
-    use gpui_component::{IconName, IconNamed};
+    use gpui_kit::AssetSource;
+    use gpui_kit::component::{IconName, IconNamed};
     use resvg::usvg;
 
     use super::*;

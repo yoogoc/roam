@@ -1,5 +1,9 @@
 # Roam 设计方案
 
+> 2026-09-10：UI 已迁移到 gpui-kit 0.6.1，SFTP 类型、OpenDAL feature、SSH 认证助手及测试服务已移除。
+> 旧 SFTP 配置保留以便手动删除，连接时明确报错，不影响其他配置的保存。下文里程碑与性能数字为历史记录。
+
+
 跨后端文件浏览器 · OpenDAL + GPUI
 
 **技术栈**（已核对 crates.io，2026-08-14）
@@ -28,7 +32,7 @@
 │  ProfileStore · Capabilities                 │
 ├──────────────────────────────────────────────┤
 │  Backend 层  (OpenDAL Operator + Layers)      │
-│  fs · s3 · gcs · azblob · webdav · sftp ...  │
+│  fs · s3 · gcs · azblob · webdav  │
 └──────────────────────────────────────────────┘
 ```
 
@@ -412,13 +416,13 @@ keyring = "4.1"       # 不是 3.x；默认的 v1 feature 保留 v1 API 并自�
 directories = "6"
 ```
 
-`services-sftp` 在 macOS / Linux 上开启，Windows 上不开 —— 它和其他后端不是一类东西，见下。
+当前版本通过 `gpui-kit 0.6.1` 统一引入 UI 依赖；所有平台均提供 fs、s3、gcs、azblob、webdav 五种连接。
 
 ---
 
 ## 14. 落地现状
 
-`cargo test --workspace` **252 项离线通过 + 47 项后端集成**（roam-core 163 + 规模 7 · roam-ui 82 · S3 23 · azblob/gcs/webdav/sftp 22 · UI-S3 2），我们自己的代码无编译警告。
+`cargo test --workspace` **252 项离线通过 + 47 项后端集成**（roam-core 163 + 规模 7 · roam-ui 82 · S3 23 · azblob/gcs/webdav 22 · UI-S3 2），我们自己的代码无编译警告。
 
 ```
 crates/roam-core/   无 gpui 依赖 · 67 项测试
@@ -726,31 +730,12 @@ WebDAV 那条集成测试因此**断言不变量而不是路径**：无论走续
 
 菜单门控也随之变了：目录的重命名要求 `list && copy && delete`，而不是 `rename`。
 
-### sftp：唯一不走 HTTP 的后端
-
-`opendal-service-sftp` 建立在 `openssh` crate 上，而后者**调用系统的 `ssh` 二进制**。这不是一个纯 Rust 客户端，带来四个和其他后端不同的约束：
-
-- **Windows 上根本不存在这个后端。** `openssh` 是 Unix-only 的，连编译都不过，所以 `services-sftp` 不能写在 workspace 清单里 —— 它挂在 `crates/roam-core/Cargo.toml` 的 `[target.'cfg(not(windows))'.dependencies]` 下。代码这一侧跟着走同一条 cfg：`service::SERVICES` 在 Windows 上少一项（表单因此不会给出一个连不上的选项，`for_scheme` 也就不再认识这个 scheme），`sftp_auth` 整个模块不编译，`Vfs::from_profile` 遇到 `sftp://` 直接给出「Windows 版不支持 SFTP」而不是 OpenDAL 的「unsupported scheme」—— 后者说的是现象，不是原因，而这个原因用户改不了。旧的 profile 仍然留在侧栏里（`load` 从不校验），点开时才解释自己。
-- 运行时依赖宿主机 `PATH` 里有可用的 `ssh` / `sftp`；
-- 主机密钥校验是系统的，所以连一台新服务器需要 `known_hosts_strategy` 策略（测试里用 `accept`）；
-- 认证走 ssh 的方式，**密钥必须是磁盘上的文件**，所以 profile 里存的是密钥**路径**而不是密钥内容。这原本是「凭据只进钥匙串」原则的一个例外；那条原则现在已经不在了（见 §5），所以它也不再是例外 —— 表单把它渲染成一个路径字段。
-
-它的 capability 也和别人都不一样：**唯一同时支持分片写和原生重命名的后端**。
-
-| | `write_can_multi` | `copy` | `rename` | `presign` |
-| --- | --- | --- | --- | --- |
-| s3 / gcs | ✅ | ✅ | ❌ | ✅ |
-| azblob | ✅ | ✅ | ❌ | ❌ |
-| webdav | ❌ | ✅ | ✅ | ❌ |
-| **sftp** | **✅** | ✅ | **✅** | ❌ |
-
-### 起测试服务时踩到的三个坑
+### 起测试服务时踩到的坑
 
 都是脚本层面的，但每一个都会让「集成测试跑不起来」看起来像代码坏了：
 
 - **macOS 的 `TMPDIR` 不能拿来做 Docker bind mount。** 它解析成 `/var/folders/...`，而 Docker Desktop 默认不共享这个路径 —— mount 会静默失效，MinIO 报 `Unable to use the drive /data: drive not found`。数据目录改到仓库内的 `target/test-backends`（已被 gitignore，且必然在共享范围内）。
 - **只有正在运行的容器值得复用。** 原来的脚本对已存在的容器一律 `docker start`，但 `down` 会删掉数据目录，于是旧容器的 bind mount 指向一个已经不是原样的路径。现在停止的容器一律重建。
-- **`set -o pipefail` 会吃掉 `cmd | grep -q` 的成功。** sftp 的就绪探测是 `ssh ... | grep -q "sftp connections only"`；`ssh` 在这里必然非零退出，pipefail 就让整条管道失败，即使 grep 匹配上了。改成先把输出收进变量再判断。
 
 ### clippy
 
@@ -817,7 +802,7 @@ CI（`.github/workflows/ci.yml`）沿着代码本身的接缝切分：
 | `cargo test -p roam-core` | ✅ 163 + 22 + 23 + 7 |
 | 起五个后端服务 | ✅ 15.7s |
 | S3 集成 | ✅ 23 |
-| azblob / gcs / webdav / sftp 集成 | ✅ 22 |
+| azblob / gcs / webdav 集成 | ✅ 22 |
 | release scale（10 万条目） | ✅ 首批 13.3 ms，总计 3.12 s |
 | `if: always()` 收尾 | ✅ 前一步失败时也确实执行了 |
 
@@ -825,7 +810,6 @@ scale 在容器里比 macOS 慢（13.3 ms / 3.12 s，对 6.08 ms / 1.16 s），�
 
 **这一轮找出三个真 bug，同一个根因**：`docker run -v` 的源路径是在 **daemon 的**文件系统里解析的，不是在执行 step 的那个文件系统里。当 step 直接跑在宿主上（本地 macOS、或 GitHub 的普通 runner）两者恰好相同，问题完全不可见；一旦 step 跑在容器里（嵌套 runner、self-hosted 的容器化 runner），bind mount 就会静默地交付一个**空目录**。用一个最小实验单独确认过：在挂了宿主 `docker.sock` 的容器里写一个文件，再把该路径挂进另一个容器 —— 内层看得见，挂进去是空的。
 
-- **sftp 起不来**（唯一会报错的一个，因为它必须**读到**我们刚生成的公钥）。改成 `docker cp` 把公钥送进容器，走 Docker API，两种情况都成立。数据目录挂成空的无害，公钥挂成空的就是「sshd 永远不接受我们、然后就绪探测超时，而且没有任何信息指向真正的原因」。
 - **MinIO 的 bucket 不存在** —— 原来靠「在数据目录里 mkdir 一个同名目录」来建桶。改成走 S3 API（`PUT /bucket`）。顺带这也去掉了对「目录 = bucket」这个 MinIO 后端布局实现细节的依赖。
 - **fake-gcs 的 bucket 不存在** —— 同上，改成走 JSON API。
 
@@ -833,7 +817,28 @@ scale 在容器里比 macOS 慢（13.3 ms / 3.12 s，对 6.08 ms / 1.16 s），�
 
 **仍未验证的**：这是 `act` 在 arm64 Linux 容器里跑的，不是 GitHub 托管的 x86_64 `ubuntu-latest`；`Swatinem/rust-cache` 在本地没有 cache 服务，实际是空转。**`ui` job 用 act 验证没有意义** —— act 没有 macOS runner 镜像，它会去问「用哪个 Linux 镜像」，而拿 Linux 跑 gpui 只会给出一个假通过；不过那个 job 的宿主就是 macOS，它的每条命令本来就在本机直接跑过。
 
-### 升级到 gpui-component git main：UI 测试在 macOS 上被上游挡住
+### gpui-kit 0.6.1 迁移（2026-09-10）
+
+应用和视图层仅直接依赖 `gpui-kit`，通过 `gpui_kit::*`、`component`、`assets` 使用
+配套 API。`test-support` 只在开发依赖开启，`Cargo.lock` 锁定配套的 `gpui-pre 0.3.4`。
+
+旧的 macOS `Root` 测试窗口崩溃已解决。测试脚手架通过
+`cx.background_executor.allow_parking()` 显式允许真实 Tokio 线程唤醒 UI 任务，
+不修改生产调度器。新版输入的 `set_value` 用于无事件初始化，模拟用户编辑的测试使用
+`replace_all` 触发 Change。也修正了过去被初始化崩溃遮住的过期表单断言：S3 必填区域，
+GCS 允许默认凭据。112 项 UI 测试通过，CI 恢复强制执行。
+
+SFTP 从连接列表、OpenDAL feature、认证助手、测试脚本与安装包依赖中移除。
+旧配置不自动改写；连接与编辑均显示类型已移除，删除旧记录后其余连接仍正常工作。
+
+本次在 macOS 验证：`cargo test --workspace --locked`、全目标构建、Clippy（`-D warnings`）
+和格式检查通过；四个本地协议服务的集成套件通过（24 项 S3、16 项其他后端、2 项 UI-S3，
+模拟器自身的限制仍见下文）。主应用及五个示例均完成真实窗口启动检查，连接表单截图确认
+类型列表与按钮布局。Linux / Windows 的新版构建与安装包未在本次验证。
+
+### 历史：升级到 gpui-component git main 时的 macOS UI 测试故障
+
+> 以下记录针对旧 Git 依赖，已被上述 gpui-kit 迁移解决。
 
 依赖已切到上游 main（`gpui-component` / `gpui-base` / `gpui-component-assets` @ `bd83329`，`gpui` / `gpui_platform` 来自 zed @ `bc538de`）。**app 本身正常**：构建通过、真机跑起来、窗口在屏、`roam-core` 229 个测试全绿。
 
@@ -897,30 +902,6 @@ not implemented: Test Windows are not backed by a real platform window
 
 **回归防护**:缓存淘汰有 4 个单测（含「当前目录不被淘汰」和「少量浏览不触发淘汰」）；树缓存有 3 个 gpui 测试。后者是**不开窗口**写的，因为 `Root` 在 macOS 测试平台下会 panic（见上文），而 `DirTreeView` 只需要 `App` —— 顺带发现 zed 新的测试调度器还会把我们 tokio 线程上的活动判为「非确定性」，所以这些测试也刻意不触发任何列举。
 
-### SFTP 密码认证:为什么只有一条路可走
-
-用户要求 sftp 支持账号密码。**OpenDAL 的 sftp service 没有 password 选项** —— 它的配置只有 `endpoint`、`root`、`user`、`key`、`known_hosts_strategy`、`enable_copy`;底下建的是 `openssh::SessionBuilder`,而它的认证设置只有 `keyfile`、`user`、`ssh_auth_sock`。原因是它并不自己说 SSH 协议:它 fork 系统 `ssh`,而 `ssh` 按设计从不接受命令行密码。
-
-`ssh` 接受的是**助手程序**:设了 `SSH_ASKPASS` 且 `SSH_ASKPASS_REQUIRE=force` 时,它向该程序索取密码而不是读终端(OpenSSH 8.4+ 无需 `DISPLAY`;实测 macOS 自带的 10.3 可用)。OpenDAL fork 的 `ssh` 是我们的子进程,继承我们的环境 —— 这是不改 OpenDAL 就能走的门。
-
-**但只有这一半不够。** `openssh` 的命令行里写死了 `-o BatchMode=yes`,而 `BatchMode` 恰恰就是关掉密码提示(含 askpass)的那个开关。实测:同一个连接不带它能成功,带上就得到 `Permission denied (publickey,password,keyboard-interactive)`。而且**从外面覆盖不掉** —— `ssh` 对同一选项取**首个**值,它已经在命令行上了。
-
-所以第二半:`openssh` 是通过 **PATH** 找 `ssh` 的,我们在自己进程的 PATH 前面放一个同名 shim。它只摘掉那一个选项,然后 `exec` 真正的 `ssh`,其余一字不动 —— argv 是**逐个轮转**而不是拼字符串重建的,因为控制 socket 路径带空格。shim 只在 profile 真的配了密码时才装,所以纯密钥连接保留 `BatchMode` 与它的快速失败。
-
-**密码怎么找到对应的连接。** `SSH_ASKPASS` 是进程全局的,而 app 可以同时开多个 sftp 会话。`ssh` 把提示词作为唯一参数传给助手(`pwuser@127.0.0.1's password: `),所以助手能判断是**谁**在问,按 `user@host` 去环境变量里取 —— 密码因此不落任何文件,包括助手脚本自己。端口不出现在提示里,所以推导键名时必须剥掉端口(实测在 12222 上确认)。
-
-写这段时踩到的:
-
-- 助手里的 shell 变换和 Rust 里的 `env_key` 必须推出同一个名字。不一致的表现是「密码为空」→ 看起来像凭据错误而不是 bug,所以有一条测试**真的执行那个脚本**来比对。
-- 我自己的测试先撞上了这个设计的边界:两个测试用同一个 `user@host`,而环境是全局的,先跑的「错密码」那条**覆盖**了后跑的正确密码。改成用不同用户 —— 这也说明同一 `user@host` 配两个不同密码是这套机制的真实限制。
-- endpoint 必须写成 `ssh://host:port`。`host:port` 会被 openssh 当作**主机名**整体传给 ssh,失败信息是「连不上」,与认证无关。
-- 测试容器要用 `user:pass:[e]:uid:gid:dirs`,把 `upload` 写到 gid 位会让容器直接退出(`Invalid GID`)。
-- 容器重建后主机密钥变了,`StrictHostKeyChecking=no` **不会**放过「密钥变更」(它只自动接受新主机),所以 `up sftp-pw` 会先清掉那条 known_hosts 记录。
-
-**代价**:密码在 app 进程的环境里存活。其他用户读不到,同一用户能读到 —— 与 `profiles.toml` 已有的暴露面相同(§5),不新增风险类别,但值得知道而不是假设。
-
-验证:`scripts/test-backends.sh up sftp-pw` 起一台密码认证的 atmoz/sftp,两条集成测试跑真上传+列举+读回,以及一条「错密码被拒」。
-
 ### 显示/隐藏点文件
 
 过滤放在索引视图里,和排序、文本过滤复合,不克隆条目也不重新列举 —— 条目已经在内存里,为一个显示设置去重新拉一遍大目录是完全错的取舍。
@@ -945,7 +926,7 @@ not implemented: Test Windows are not backed by a real platform window
 - 断点续传：目前失败只靠 RetryLayer 覆盖网络抖动，没有基于 multipart upload id 的持久化续传。
 - 重命名目录仍未做：需要 copy + delete 的组合，且要在传输引擎里做成可见任务而非伪装成一次重命名。
 - `fill_metadata` 有实现和单测，但要等接上元数据不全的对象存储才会在真实场景触发 —— 本地 `fs` 和 S3 的 list 都返回完整元数据。
-- `services-sftp`、跨后端复制、传输引擎（M4）。
+- 跨后端复制、传输引擎（M4，后续已实现）。
 
 ### 尚未验证的部分
 

@@ -10,8 +10,8 @@
 
 use std::sync::Arc;
 
-use gpui::{AnyView, App, AppContext, Bounds, Window, WindowBounds, WindowOptions, px, size};
-use gpui_component::Root;
+use gpui_kit::component::Root;
+use gpui_kit::{AnyView, App, AppContext, Bounds, Window, WindowBounds, WindowOptions, px, size};
 use roam_core::{ProfileStore, Rt, Vfs};
 use roam_ui::{Assets, Workspace};
 
@@ -21,10 +21,10 @@ fn main() {
     let local = Vfs::local(rt.clone(), temp.to_str().unwrap()).expect("local session");
     let store = Arc::new(ProfileStore::at(temp.join("roam-example-profiles.toml")));
 
-    gpui_platform::application()
+    gpui_kit::application()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
-            gpui_component::init(cx);
+            gpui_kit::init(cx);
             // Installs the keyboard bindings; without it every shortcut is inert.
             roam_ui::init(cx);
 

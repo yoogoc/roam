@@ -12,9 +12,7 @@ path = "src/main.rs"
 [dependencies]
 roam-core.workspace = true
 roam-ui.workspace = true
-gpui.workspace = true
-gpui_platform.workspace = true
-gpui-component.workspace = true
+gpui-kit.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
@@ -34,8 +32,8 @@ product-name = "Roam"
 identifier = "dev.roam.Roam"
 description = "Cross-backend file browser"
 long-description = """
-Browse local disk, S3, Google Cloud Storage, Azure Blob Storage, WebDAV and SFTP
-(macOS and Linux) in one window, with transfers between them.
+Browse local disk, S3, Google Cloud Storage, Azure Blob Storage and WebDAV
+in one window, with transfers between them.
 """
 homepage = "https://github.com/yoogoc/roam"
 authors = ["yoogo"]
@@ -73,7 +71,7 @@ minimum-system-version = "11.0"
 # cargo-packager always passes `--options runtime` for a native binary, and only
 # passes `--entitlements` when one is configured. So this single line is the whole
 # signing setup, and leaving `entitlements` unset is what keeps App Sandbox off —
-# which matters, because turning it on breaks sftp (docs/PACKAGING.md).
+# see docs/PACKAGING.md for the distribution configuration.
 # signing-identity = "Developer ID Application: NAME (TEAMID)"
 
 # Notarization is credential-driven, not config-driven: cargo-packager notarizes
@@ -102,8 +100,6 @@ depends = [
     "libfreetype6",
     "libgbm1",
     "libvulkan1",
-    # The sftp backend runs it; without ssh that backend silently has no way to work.
-    "openssh-client",
 ]
 
 [package.metadata.packager.dmg]

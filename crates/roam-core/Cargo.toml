@@ -18,15 +18,6 @@ serde.workspace = true
 toml.workspace = true
 directories.workspace = true
 
-# The sftp backend, everywhere it can exist. OpenDAL's sftp service is a wrapper
-# around the system `ssh` binary (through `openssh`), and that crate is Unix-only
-# — on Windows it does not compile, so the feature cannot simply live in the
-# workspace manifest. Enabling it per-target compiles it in on macOS and Linux and
-# leaves it out on Windows; `service::SERVICES` and `Vfs::from_profile` are cfg'd
-# the same way so the app never offers a backend this build does not have.
-[target.'cfg(not(windows))'.dependencies]
-opendal = { workspace = true, features = ["services-sftp"] }
-
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "time"] }
 tempfile = "3"

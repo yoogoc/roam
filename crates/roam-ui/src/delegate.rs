@@ -1,9 +1,9 @@
 use std::rc::Rc;
 
-use gpui::{App, Context, IntoElement, ParentElement, Styled, Window, div, px};
-use gpui_component::menu::{PopupMenu, PopupMenuItem};
-use gpui_component::table::{Column, ColumnSort, TableDelegate, TableState};
-use gpui_component::{ActiveTheme, Icon, IconName, h_flex};
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
+use gpui_kit::component::{ActiveTheme, Icon, IconName, h_flex};
+use gpui_kit::{App, Context, IntoElement, ParentElement, Styled, Window, div, px};
 use roam_core::{DirEntry, EntryAction, EntryKind, SortKey, Vfs, ViewOptions, fmt, view_indices};
 
 /// Invoked when a context-menu item is chosen. The `Browser` installs this so
@@ -453,10 +453,8 @@ mod scale_tests {
 
 #[cfg(test)]
 mod hidden_tests {
-    //! Runs without a window on purpose: the delegate is a plain struct, and the
-    //! browser harness that would otherwise cover this cannot start under gpui's
-    //! macOS test platform (see docs/DESIGN.md). This is the layer where the
-    //! behaviour lives anyway.
+    //! Exercises the delegate's filtering directly, without window setup.
+    //! Browser tests cover the same behavior through GPUI interactions.
 
     use super::*;
 

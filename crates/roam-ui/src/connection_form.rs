@@ -10,14 +10,14 @@
 
 use std::collections::BTreeMap;
 
-use gpui::{
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::switch::Switch;
+use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
+use gpui_kit::{
     AnyElement, App, AppContext, ClickEvent, Context, Entity, IntoElement, ParentElement, Render,
     SharedString, Styled, Window, div, prelude::FluentBuilder,
 };
-use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::input::{Input, InputState};
-use gpui_component::switch::Switch;
-use gpui_component::{ActiveTheme, Sizable, h_flex, v_flex};
 use roam_core::service::{self, Field, FieldKind, Service};
 use roam_core::{Profile, ProfileId, Result, profile};
 

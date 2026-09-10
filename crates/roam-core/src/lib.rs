@@ -15,10 +15,6 @@ pub mod preview;
 pub mod profile;
 pub mod rt;
 pub mod service;
-// POSIX `sh` helpers for a backend that only exists on Unix — see the module's
-// own docs, and `service::SERVICES` for why Windows has no sftp at all.
-#[cfg(not(windows))]
-pub mod sftp_auth;
 pub mod transfer;
 pub mod tree;
 pub mod vfs;

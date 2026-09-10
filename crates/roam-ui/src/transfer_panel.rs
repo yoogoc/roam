@@ -1,13 +1,13 @@
 use std::time::Duration;
 
-use gpui::{
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::progress::Progress;
+use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::component::{ActiveTheme, Disableable, Icon, IconName, Sizable, h_flex, v_flex};
+use gpui_kit::{
     ClickEvent, Context, IntoElement, ParentElement, Render, SharedString, Styled, Task, Window,
     div, prelude::FluentBuilder, px,
 };
-use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::progress::Progress;
-use gpui_component::scroll::ScrollableElement;
-use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Sizable, h_flex, v_flex};
 use roam_core::transfer::{TaskSnapshot, TaskState, TransferOverview};
 use roam_core::{TransferEngine, fmt};
 

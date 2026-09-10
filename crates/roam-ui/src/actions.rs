@@ -8,7 +8,7 @@
 //! call — an action with no binding is silently inert, which is the kind of bug
 //! that survives a long time.
 
-use gpui::{App, KeyBinding, actions};
+use gpui_kit::{App, KeyBinding, actions};
 
 /// Key context of the browsing pane. Bindings are scoped to it so that typing in
 /// the filter box or a dialog does not trigger navigation.

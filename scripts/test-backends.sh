@@ -13,7 +13,7 @@
 #   scripts/test-backends.sh test [backend]   start, then run that backend's tests
 #   scripts/test-backends.sh down             stop and remove everything
 #
-# backend: s3 | azblob | gcs | webdav | sftp | sftp-pw | all   (default: all)
+# backend: s3 | azblob | gcs | webdav | all   (default: all)
 #
 set -euo pipefail
 
@@ -21,14 +21,6 @@ S3_PORT=19000
 AZ_PORT=10000
 GCS_PORT=14443
 DAV_PORT=18080
-SFTP_PORT=2222
-
-# A second sftp server, this one accepting a password. Separate because with a
-# usable key ssh never asks for a password, so one server cannot exercise both.
-SFTP_PW_PORT=12222
-SFTP_PW_USER=pwuser
-SFTP_PW_PASSWORD=pwsecret
-
 BUCKET=roam-test
 KEY=roamtest
 SECRET=roamtest-secret
@@ -246,101 +238,6 @@ up_webdav() {
     wait_for webdav "http://${KEY}:${SECRET}@127.0.0.1:${DAV_PORT}/" any
 }
 
-up_sftp_password() {
-    # A second sftp server that accepts a password, for the SSH_ASKPASS path in
-    # `roam_core::sftp_auth`. The key-based one cannot exercise it: with a usable
-    # key ssh never asks for a password at all.
-    #
-    # The user spec is `user:pass:[e]:uid:gid:dirs` — `upload` has to go in the
-    # dirs field, and putting it where the gid belongs makes the container exit
-    # with "Invalid GID".
-    start roam-sftp-pw \
-        -p "${SFTP_PW_PORT}:22" \
-        atmoz/sftp "${SFTP_PW_USER}:${SFTP_PW_PASSWORD}:1001::upload"
-
-    printf 'waiting for sftp-pw' >&2
-    for _ in $(seq 1 60); do
-        if docker logs roam-sftp-pw 2>&1 | grep -q "Server listening"; then
-            echo " ready" >&2
-            # A recreated container gets a new host key, and ssh refuses a changed
-            # one even with StrictHostKeyChecking=no. Drop the stale entry rather
-            # than leave every connection failing with a scary warning.
-            ssh-keygen -R "[127.0.0.1]:${SFTP_PW_PORT}" >/dev/null 2>&1 || true
-            return 0
-        fi
-        printf . >&2
-        sleep 0.5
-    done
-
-    echo " timed out" >&2
-    return 1
-}
-
-up_sftp() {
-    # A dedicated keypair under the data dir, so nothing touches ~/.ssh. The
-    # sftp backend authenticates the way `ssh` does, which means the key has to
-    # exist as a file — there is no way to hand it bytes from a keychain.
-    mkdir -p "$DATA/sftp/data" "$DATA/sftp/keys"
-    if [ ! -f "$DATA/sftp/keys/id_ed25519" ]; then
-        ssh-keygen -t ed25519 -N "" -C roam-test \
-            -f "$DATA/sftp/keys/id_ed25519" >/dev/null
-    fi
-
-    local fresh=1
-    [ -n "$(docker ps -q -f name='^roam-sftp$')" ] && fresh=0
-
-    start roam-sftp \
-        -p "${SFTP_PORT}:22" \
-        -v "$DATA/sftp/data:/home/${KEY}/upload" \
-        atmoz/sftp "${KEY}::1001"
-
-    # The public key is copied in rather than bind-mounted. `docker run -v`
-    # resolves the source path in the *daemon's* filesystem, not ours, so a bind
-    # mount silently delivers an empty file whenever the daemon lives somewhere
-    # else — a CI runner that executes steps inside a container, or Docker
-    # Desktop with an unshared path. An empty data directory is harmless, but an
-    # empty authorized key means sshd never accepts us and the wait below just
-    # times out with nothing explaining why. `docker cp` goes through the API,
-    # so it works in both cases.
-    #
-    # The directory only exists once the entrypoint has created the user, hence
-    # start → copy → restart, which is also how the image itself ingests keys.
-    if [ "$fresh" = 1 ]; then
-        for _ in $(seq 1 30); do
-            docker exec roam-sftp test -d "/home/${KEY}" 2>/dev/null && break
-            sleep 0.2
-        done
-        docker exec roam-sftp mkdir -p "/home/${KEY}/.ssh/keys"
-        docker cp "$DATA/sftp/keys/id_ed25519.pub" \
-                  "roam-sftp:/home/${KEY}/.ssh/keys/id_ed25519.pub" >/dev/null
-        docker restart roam-sftp >/dev/null
-    fi
-
-    printf 'waiting for sftp' >&2
-    for _ in $(seq 1 60); do
-        # The image refuses shell sessions, so a successful *connection* is what
-        # we wait for, whatever it says afterwards. The output is captured rather
-        # than piped into grep: `ssh` exits non-zero here, and under
-        # `set -o pipefail` that would fail the whole pipeline even when grep
-        # matched.
-        local probe
-        probe=$(ssh -i "$DATA/sftp/keys/id_ed25519" -p "$SFTP_PORT" \
-                    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-                    -o BatchMode=yes -o ConnectTimeout=2 \
-                    "${KEY}@127.0.0.1" true 2>&1 || true)
-        case "$probe" in
-            *"sftp connections only"*)
-                echo " ready" >&2
-                return 0
-                ;;
-        esac
-        printf . >&2
-        sleep 0.5
-    done
-    echo " timed out" >&2
-    return 1
-}
-
 env_block() {
     cat <<EOF
 export ROAM_S3_ENDPOINT=http://127.0.0.1:${S3_PORT}
@@ -356,12 +253,6 @@ export ROAM_GCS_BUCKET=${BUCKET}
 export ROAM_WEBDAV_ENDPOINT=http://127.0.0.1:${DAV_PORT}
 export ROAM_WEBDAV_USER=${KEY}
 export ROAM_WEBDAV_PASSWORD=${SECRET}
-export ROAM_SFTP_ENDPOINT=ssh://127.0.0.1:${SFTP_PORT}
-export ROAM_SFTP_USER=${KEY}
-export ROAM_SFTP_KEY=${DATA}/sftp/keys/id_ed25519
-export ROAM_SFTP_PW_ENDPOINT=ssh://127.0.0.1:${SFTP_PW_PORT}
-export ROAM_SFTP_PW_USER=${SFTP_PW_USER}
-export ROAM_SFTP_PW_PASSWORD=${SFTP_PW_PASSWORD}
 EOF
 }
 
@@ -386,9 +277,7 @@ case "${1:-up}" in
             azblob) up_azblob ;;
             gcs) up_gcs ;;
             webdav) up_webdav ;;
-            sftp) up_sftp ;;
-            sftp-pw) up_sftp_password ;;
-            all) up_s3; up_azblob; up_gcs; up_webdav; up_sftp; up_sftp_password ;;
+            all) up_s3; up_azblob; up_gcs; up_webdav ;;
             *) echo "unknown backend: $BACKEND" >&2; exit 2 ;;
         esac
 
@@ -415,13 +304,13 @@ case "${1:-up}" in
         fi
         ;;
     down)
-        docker rm -f roam-minio roam-azurite roam-gcs roam-dav roam-sftp roam-sftp-pw \
+        docker rm -f roam-minio roam-azurite roam-gcs roam-dav \
             >/dev/null 2>&1 || true
         rm -rf "$DATA"
         echo "stopped and removed the test backends"
         ;;
     *)
-        echo "usage: $0 {up|test|down} [s3|azblob|gcs|webdav|sftp|sftp-pw|all]" >&2
+        echo "usage: $0 {up|test|down} [s3|azblob|gcs|webdav|all]" >&2
         exit 2
         ;;
 esac

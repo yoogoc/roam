@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
-use gpui::{
+use gpui_kit::component::Root;
+use gpui_kit::{
     AnyView, App, AppContext, Bounds, TitlebarOptions, Window, WindowBounds, WindowOptions, px,
     size,
 };
-use gpui_component::Root;
 use roam_core::{ProfileStore, Rt, Vfs};
 use roam_ui::{Assets, Workspace};
 
@@ -48,10 +48,10 @@ fn main() -> Result<()> {
 
     tracing::info!(root = %root, profiles = %store.path().display(), "opening roam");
 
-    gpui_platform::application()
+    gpui_kit::application()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
-            gpui_component::init(cx);
+            gpui_kit::init(cx);
             // Installs the keyboard bindings; without it every shortcut is inert.
             roam_ui::init(cx);
 

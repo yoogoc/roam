@@ -14,32 +14,11 @@ cargo packager -p roam --release --formats nsis      # 或 wix
 
 产物落在 `target/release/`：`Roam.app`、`Roam_0.1.0_aarch64.dmg`。
 
-## 不能上 App Store，因为 sftp
+## 分发配置
 
-sftp 后端会运行系统 `ssh`（OpenDAL 的 sftp service 是 fork `ssh` 的）。**App Sandbox
-不允许沙箱进程启动 bundle 之外的可执行文件**，也没有任何 entitlement 能开这个口子。
-
-这一条是**实测**的。同一个 bundle、同一台 sftp 服务器、同一份代码，只改 entitlements：
-
-| 签名 | sftp 密码认证测试 |
-| --- | --- |
-| hardened runtime **+ app-sandbox** | **失败**：`failed to connect to the remote host: Operation not permitted (os error 1)` |
-| 仅 hardened runtime | 通过 |
-
-顺带一个坑：给**非 bundle** 的二进制加 sandbox entitlement 再运行，进程会以 SIGTRAP
-立刻死掉、什么都不输出 —— 那不是"沙箱下 sftp 失败"，那是根本没启动。必须放进真
-bundle 才测得出上面那一行。
-
-结论：**签 hardened runtime、不签 sandbox**，走 App Store 之外的分发。想上 App Store
-就得砍掉 sftp 后端。
-
-cargo-packager 恰好天然符合这个要求，不需要额外设置：
-
-- 对原生二进制**总是**传 `--options runtime`；
-- 只有在配置了 `macos.entitlements` 时才传 `--entitlements`。
-
-所以**把 `entitlements` 留空**就是"不开沙箱"。已验证签名结果：
-`flags=0x10000(runtime)`，`app-sandbox` 权限数 0，内层二进制与 bundle 都签。
+当前配置沿用 hardened runtime，未开启 App Sandbox。SFTP 已移除，应用不再为连接
+启动外部 SSH 程序，Linux 安装包也不再依赖 `openssh-client`。此次迁移没有改变签名、
+文件访问权限或分发渠道；App Sandbox 和 App Store 分发仍需单独验证。
 
 ## 签名与公证
 
@@ -88,8 +67,8 @@ cargo-packager 只打包、**不构建**，所以 `before-packaging-command` 里
 全列出来，cargo-packager 按平台各取所需 —— 已验证 bundle 里的 `roam.icns` 与源文件
 **字节一致**。
 
-这套图标与 `crates/roam-ui/assets/icons/` 是两回事，别混：后者是 UI 里画的 86 个界面
-图标，由 rust-embed 编进二进制。
+界面图标由 `gpui_kit::assets::Assets` 提供，应用启动时显式注册。
+`crates/roam-ui/assets/icons/` 中保留的是旧版资源；当前构建不使用它们。
 
 ## 两个会咬人的环境问题
 
@@ -147,7 +126,7 @@ GitHub 较新提供的 arm64 runner；如果你的仓库还拿不到它们，那
 
 **Linux** — **编译已经在容器里验证过了**（arm64 的 `rust:1-slim`，`cargo check -p roam
 --release` 通过，`roam-core` / `roam-ui` / `roam` 三个 crate 全过，0 错误）。为此做了一件事：
-`gpui_platform` 的 feature 从只开 macOS 那两个改成上游的四个全开。
+旧版本将 `gpui_platform` 的四个 feature 全部开启；现在由 `gpui-kit` 统一启用。
 
 这四个能同时开是因为它们映射到**按 target cfg 引入**的子 crate ——
 `font-kit`/`runtime_shaders` → `gpui_macos`，`x11`/`wayland` → `gpui_linux` —— 所以在
@@ -170,28 +149,18 @@ libgbm-dev libvulkan-dev
 这条修法本身**未验证**：容器里没再跑一次。
 
 另外 cargo-packager **不自动探测 `.deb` 依赖**，只写配置里的 `depends`，不配就产出一个
-"能装、跑不起来"的包。配置里已按构建依赖补了对应运行时包（含 `openssh-client`，否则
-sftp 后端在 Linux 上没有 `ssh` 可用）。
+"能装、跑不起来"的包。配置里按构建依赖列出对应运行时包。
 
 AppImage 的工具链在两个架构下都齐：`AppRun-{x86_64,aarch64}`、
 `linuxdeploy-{arch}.AppImage`、`linuxdeploy-plugin-appimage-{arch}.AppImage` 六个资产
 都实测返回 200。
 
-**Windows** — 有真实的功能损失：
-
-- **整个 sftp 后端没有。** 不是密码认证的问题：`opendal-service-sftp` 依赖的
-  `openssh` crate 是 Unix-only 的，在 Windows 上连编译都不过。所以 `services-sftp`
-  改成按 target 开启（见 `crates/roam-core/Cargo.toml`），Windows 构建里不含这个
-  服务，连接表单也不列它。之前这里写的是「密码认证不成立」（askpass + shim 是
-  POSIX `sh` 写的，Windows OpenSSH 没有 askpass 这一套）—— 那条仍然对，只是现在
-  连密钥认证也谈不上了。
-- 文件权限那几处是 `#[cfg(unix)]`：`profiles.toml` 的 `0600` 和助手脚本的 `0700` 在
-  Windows 上都不生效。而这个文件**装着明文凭据** —— Windows 上得换成 ACL，否则那句
-  "仅本人可读"就是假的。
+**Windows** — 提供与其他平台相同的五种连接类型。`profiles.toml` 的 `0600`
+权限设置仍只在 Unix 生效，Windows 的配置文件访问控制需要通过 ACL 单独验证。
 
 ## 已验证 / 未验证
 
-**已验证**（都在本机真做过）：
+**历史验证记录**（迁移前在本机完成，不代表新版依赖的打包结果）：
 
 - `cargo packager -p roam --release --formats app,dmg` 一条命令产出 `Roam.app`（arm64）
   与 13 MB 的 `Roam_0.1.0_aarch64.dmg`；
@@ -202,7 +171,6 @@ AppImage 的工具链在两个架构下都齐：`AppRun-{x86_64,aarch64}`、
 - 用 Apple Development 身份签名后：`flags=0x10000(runtime)`、无 sandbox、
   `codesign --verify --strict --deep` 通过、**签名后 app 仍能启动**（窗口 1180×792）；
 - DMG 能挂载、含 `/Applications` 链接、**从挂载点直接启动 app 也能开窗口**；
-- hardened runtime 下 sftp 密码认证通过；加上 app-sandbox 则失败。
 
 **未验证**：
 

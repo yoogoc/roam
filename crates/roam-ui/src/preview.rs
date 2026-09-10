@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
-use gpui::{
+use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::component::text::TextView;
+use gpui_kit::component::{ActiveTheme, Icon, IconName, h_flex, v_flex};
+use gpui_kit::{
     Image, ImageFormat, IntoElement, ParentElement, Render, SharedString, Styled, Task, Window,
     div, img, prelude::FluentBuilder, px,
 };
-use gpui_component::scroll::ScrollableElement;
-use gpui_component::text::TextView;
-use gpui_component::{ActiveTheme, Icon, IconName, h_flex, v_flex};
 use roam_core::preview::{self, ImageKind, PreviewKind};
 use roam_core::{DirEntry, Vfs, fmt};
 
@@ -50,13 +50,13 @@ impl PreviewPanel {
         }
     }
 
-    pub fn set_vfs(&mut self, vfs: Vfs, cx: &mut gpui::Context<Self>) {
+    pub fn set_vfs(&mut self, vfs: Vfs, cx: &mut gpui_kit::Context<Self>) {
         self.vfs = vfs;
         self.set_entry(None, cx);
     }
 
     /// Show `entry`, or clear the panel when `None`.
-    pub fn set_entry(&mut self, entry: Option<DirEntry>, cx: &mut gpui::Context<Self>) {
+    pub fn set_entry(&mut self, entry: Option<DirEntry>, cx: &mut gpui_kit::Context<Self>) {
         // Re-selecting the same row must not refetch: Space toggling the panel
         // would otherwise re-read the object every time.
         if self.entry.as_ref().map(|e| e.path.clone()) == entry.as_ref().map(|e| e.path.clone()) {
@@ -150,7 +150,7 @@ impl PreviewPanel {
         )
     }
 
-    fn render_meta(&self, entry: &DirEntry, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+    fn render_meta(&self, entry: &DirEntry, cx: &mut gpui_kit::Context<Self>) -> impl IntoElement {
         v_flex()
             .gap_1()
             .px_3()
@@ -178,8 +178,8 @@ impl PreviewPanel {
             )
     }
 
-    fn render_body(&self, cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        let note = |text: &str, cx: &mut gpui::Context<Self>| {
+    fn render_body(&self, cx: &mut gpui_kit::Context<Self>) -> impl IntoElement {
+        let note = |text: &str, cx: &mut gpui_kit::Context<Self>| {
             h_flex()
                 .size_full()
                 .justify_center()
@@ -237,7 +237,7 @@ impl PreviewPanel {
     }
 }
 
-fn truncation_note(cx: &mut gpui::Context<PreviewPanel>) -> impl IntoElement {
+fn truncation_note(cx: &mut gpui_kit::Context<PreviewPanel>) -> impl IntoElement {
     // Saying so matters: a preview that silently stops mid-file looks like a
     // truncated file.
     h_flex()
@@ -297,7 +297,7 @@ fn image_format(kind: ImageKind) -> ImageFormat {
 }
 
 impl Render for PreviewPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut gpui_kit::Context<Self>) -> impl IntoElement {
         v_flex()
             .w(px(320.))
             .flex_none()

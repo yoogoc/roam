@@ -11,10 +11,10 @@
 //! Hence this extension trait. Every dialog in the app goes through it, so the
 //! footer is one decision made once rather than five that can drift apart.
 
-use gpui::{App, ParentElement, SharedString, Window};
-use gpui_component::WindowExt;
-use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
-use gpui_component::dialog::{Dialog, DialogFooter};
+use gpui_kit::component::WindowExt;
+use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
+use gpui_kit::component::dialog::{Dialog, DialogFooter};
+use gpui_kit::{App, ParentElement, SharedString, Window};
 
 /// The action behind a confirm button. Returns true when the dialog should
 /// close — the same contract as [`Dialog::on_ok`], so a rejected input can keep

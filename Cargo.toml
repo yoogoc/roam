@@ -11,10 +11,6 @@ license = "MIT"
 roam-core = { path = "crates/roam-core" }
 roam-ui = { path = "crates/roam-ui" }
 
-# `services-sftp` is *not* listed here: it shells out to the system `ssh`/`sftp`
-# binaries via the `openssh` crate, which is Unix-only and does not build for
-# Windows at all. It is enabled per-target in `crates/roam-core/Cargo.toml`
-# instead. See §14 for what that backend costs everywhere else.
 opendal = { version = "0.58.1", default-features = false, features = [
     "auto-register-services",
     "executors-tokio",
@@ -28,25 +24,8 @@ opendal = { version = "0.58.1", default-features = false, features = [
     "layers-timeout",
     "layers-concurrent-limit",
 ] }
-# gpui-component's main branch tracks gpui from zed's git, not crates.io. Using
-# the published gpui here instead would give us a *second*, incompatible `gpui`
-# crate — every type would be a different type, and nothing would line up.
-gpui = { git = "https://github.com/zed-industries/zed" }
-# All four, the way upstream does it. They are safe together because they map to
-# per-platform crates that gpui_platform only depends on for their own target:
-# font-kit/runtime_shaders → gpui_macos, x11/wayland → gpui_linux. Enabling the
-# Linux pair on macOS pulls in nothing.
-gpui_platform = { git = "https://github.com/zed-industries/zed", features = [
-    "font-kit",
-    "runtime_shaders",
-    "x11",
-    "wayland",
-] }
-gpui-component = { git = "https://github.com/longbridge/gpui-component" }
-# Upstream now ships the icon SVGs it names, which is what our own vendored set
-# was standing in for.
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
-rust-embed = "8"
+# Kit keeps GPUI, platform support, styled components and icons on matching releases.
+gpui-kit = "0.6.1"
 
 # "time" + "net" are what Runtime::enable_all() actually needs; the IO driver has
 # to be live before M2 puts reqwest-backed services on this runtime.

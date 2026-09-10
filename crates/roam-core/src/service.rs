@@ -25,8 +25,7 @@ pub enum FieldKind {
     /// say so.
     Path,
     /// A two-state option whose values are strings, not booleans:
-    /// `enable_virtual_host_style` wants `"true"`/`"false"` and
-    /// `known_hosts_strategy` wants `"accept"`/`"strict"`.
+    /// `enable_virtual_host_style` wants `"true"`/`"false"`.
     Toggle {
         on: &'static str,
         off: &'static str,
@@ -144,8 +143,7 @@ impl Service {
     }
 }
 
-// Each backend is named rather than written inline in the list, because the list
-// is not the same on every platform: see `SERVICES` below.
+// The same backend catalog is available on every platform.
 
 const FS: Service = Service {
     scheme: "fs",
@@ -235,39 +233,7 @@ const WEBDAV: Service = Service {
     ],
 };
 
-#[cfg(not(windows))]
-const SFTP: Service = Service {
-    scheme: "sftp",
-    label: "SFTP",
-    fields: &[
-        Field::text("endpoint", "主机", "例如 example.com:22").required(),
-        Field::text("path", "远端路径", "例如 /upload")
-            .prefix()
-            .absolute(),
-        Field::text("user", "用户名", "").required(),
-        Field::text("key", "私钥文件", "本机路径；留空则使用 ssh-agent").path(),
-        Field::text(
-            "known_hosts_strategy",
-            "接受未知主机密钥",
-            "关闭则使用系统 known_hosts",
-        )
-        .toggle("accept", "strict"),
-    ],
-};
-
-/// Every backend the app is built with, in the order the picker shows them.
-#[cfg(not(windows))]
-pub static SERVICES: &[Service] = &[FS, S3, GCS, AZBLOB, WEBDAV, SFTP];
-
-/// Every backend the app is built with, in the order the picker shows them.
-///
-/// No sftp on Windows. OpenDAL's sftp service runs the system `ssh` through the
-/// `openssh` crate, which is Unix-only — the backend is not compiled into this
-/// build at all (see `Cargo.toml`), so offering it in the picker could only ever
-/// produce a connection that fails. `for_scheme` therefore also stops recognising
-/// the scheme here, which is what keeps the form, validation and redaction from
-/// describing a backend that does not exist.
-#[cfg(windows)]
+/// Every supported backend, in the order the picker shows them on all platforms.
 pub static SERVICES: &[Service] = &[FS, S3, GCS, AZBLOB, WEBDAV];
 
 pub fn for_scheme(scheme: &str) -> Option<&'static Service> {
@@ -277,8 +243,8 @@ pub fn for_scheme(scheme: &str) -> Option<&'static Service> {
 /// Assemble a profile from what the form collected.
 ///
 /// The URI is composed rather than typed: `scheme://{host}/{prefix}`, which
-/// covers every service — a bucket-shaped one fills the host, `webdav` and
-/// `sftp` leave it empty and keep only a path, and `fs` has neither, landing on
+/// covers every service — a bucket-shaped one fills the host, `webdav`
+/// leaves it empty and keeps only a path, and `fs` has neither, landing on
 /// the `fs:///` the local session already uses.
 pub fn build_profile(
     id: ProfileId,
@@ -508,30 +474,18 @@ mod tests {
     fn a_toggle_left_alone_reads_as_off() {
         let profile = build_profile(
             "p".into(),
-            "本机".into(),
-            "fs",
-            &values(&[("root", "/tmp")]),
+            "S3".into(),
+            "s3",
+            &values(&[("bucket", "bucket"), ("region", "us-east-1")]),
         )
         .unwrap();
-        assert!(!profile.options.contains_key("known_hosts_strategy"));
+        assert_eq!(field_values(&profile)["enable_virtual_host_style"], "false");
+    }
 
-        // fs has no toggle; sftp does, and an unsaved one must not read as on.
-        // Only where sftp exists — Windows has no such service to build.
-        #[cfg(not(windows))]
-        {
-            let sftp = build_profile(
-                "s".into(),
-                "SFTP".into(),
-                "sftp",
-                &values(&[("endpoint", "h:22"), ("user", "u"), ("key", "/tmp/k")]),
-            )
-            .unwrap();
-
-            assert_eq!(
-                field_values(&sftp).get("known_hosts_strategy").unwrap(),
-                "strict"
-            );
-        }
+    #[test]
+    fn sftp_is_not_an_available_connection_type() {
+        assert!(for_scheme("sftp").is_none());
+        assert!(build_profile("old".into(), "Old".into(), "sftp", &values(&[])).is_err());
     }
 
     #[test]

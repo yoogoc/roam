@@ -3,17 +3,17 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::table::{DataTable, TableEvent, TableState};
+use gpui_kit::component::{
+    ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable, WindowExt,
+    breadcrumb::Breadcrumb, breadcrumb::BreadcrumbItem, h_flex, v_flex,
+};
+use gpui_kit::{
     AppContext, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, InteractiveElement,
     IntoElement, ParentElement, Render, SharedString, Styled, Subscription, Task, Window, div,
     prelude::FluentBuilder, px,
-};
-use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::table::{DataTable, TableEvent, TableState};
-use gpui_component::{
-    ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable, WindowExt,
-    breadcrumb::Breadcrumb, breadcrumb::BreadcrumbItem, h_flex, v_flex,
 };
 use roam_core::transfer::{
     Transfer, plan_download, plan_duplicate_dir, plan_move_dir, plan_upload,
@@ -37,14 +37,14 @@ use crate::preview::PreviewPanel;
 const SHARE_LINK_TTL: Duration = Duration::from_secs(600);
 
 /// Fired after transfers are queued, so the panel can start polling.
-type TransfersQueued = Rc<dyn Fn(&mut Window, &mut gpui::App)>;
+type TransfersQueued = Rc<dyn Fn(&mut Window, &mut gpui_kit::App)>;
 
 /// Fired when the shown directory changes, so the sidebar tree can follow.
-type DirectoryChanged = Rc<dyn Fn(Arc<str>, &mut gpui::App)>;
+type DirectoryChanged = Rc<dyn Fn(Arc<str>, &mut gpui_kit::App)>;
 
 /// Fired when dotfiles are shown or hidden, so the sidebar tree agrees with the
 /// pane about what exists.
-type HiddenChanged = Rc<dyn Fn(bool, &mut gpui::App)>;
+type HiddenChanged = Rc<dyn Fn(bool, &mut gpui_kit::App)>;
 
 /// One browsing pane over one backend session.
 pub struct Browser {
@@ -181,13 +181,16 @@ impl Browser {
 
     /// Install a callback fired whenever the shown directory changes, so the
     /// sidebar tree can follow along.
-    pub fn on_directory_changed(&mut self, callback: impl Fn(Arc<str>, &mut gpui::App) + 'static) {
+    pub fn on_directory_changed(
+        &mut self,
+        callback: impl Fn(Arc<str>, &mut gpui_kit::App) + 'static,
+    ) {
         self.on_directory_changed = Some(Rc::new(callback));
     }
 
     /// Install a callback fired whenever dotfiles are shown or hidden, so the
     /// sidebar tree can match.
-    pub fn on_hidden_changed(&mut self, callback: impl Fn(bool, &mut gpui::App) + 'static) {
+    pub fn on_hidden_changed(&mut self, callback: impl Fn(bool, &mut gpui_kit::App) + 'static) {
         self.on_hidden_changed = Some(Rc::new(callback));
     }
 
@@ -195,7 +198,7 @@ impl Browser {
     /// panel can begin polling for progress.
     pub fn on_transfers_queued(
         &mut self,
-        callback: impl Fn(&mut Window, &mut gpui::App) + 'static,
+        callback: impl Fn(&mut Window, &mut gpui_kit::App) + 'static,
     ) {
         self.on_transfers_queued = Some(Rc::new(callback));
     }
@@ -390,7 +393,7 @@ impl Browser {
 
     /// Whether dotfiles are currently listed, for the toolbar button's state —
     /// and for the sidebar tree, which follows this pane.
-    pub fn show_hidden(&self, cx: &gpui::App) -> bool {
+    pub fn show_hidden(&self, cx: &gpui_kit::App) -> bool {
         self.table.read(cx).delegate().show_hidden()
     }
 
@@ -1223,7 +1226,7 @@ impl Browser {
         self.navigate(to.into(), true, cx);
     }
 
-    pub(crate) fn entry_named(&self, name: &str, cx: &gpui::App) -> Option<DirEntry> {
+    pub(crate) fn entry_named(&self, name: &str, cx: &gpui_kit::App) -> Option<DirEntry> {
         let state = self.table.read(cx);
         let delegate = state.delegate();
         (0..)
@@ -1232,7 +1235,7 @@ impl Browser {
             .cloned()
     }
 
-    pub(crate) fn row_names(&self, cx: &gpui::App) -> Vec<String> {
+    pub(crate) fn row_names(&self, cx: &gpui_kit::App) -> Vec<String> {
         let state = self.table.read(cx);
         let delegate = state.delegate();
         (0..)
@@ -1241,7 +1244,7 @@ impl Browser {
             .collect()
     }
 
-    fn row_of(&self, name: &str, cx: &gpui::App) -> usize {
+    fn row_of(&self, name: &str, cx: &gpui_kit::App) -> usize {
         self.row_names(cx)
             .iter()
             .position(|candidate| candidate == name)
@@ -1249,8 +1252,8 @@ impl Browser {
     }
 }
 
-impl gpui::Focusable for Browser {
-    fn focus_handle(&self, _: &gpui::App) -> FocusHandle {
+impl gpui_kit::Focusable for Browser {
+    fn focus_handle(&self, _: &gpui_kit::App) -> FocusHandle {
         self.focus.clone()
     }
 }
@@ -1296,7 +1299,7 @@ impl Render for Browser {
                             // Files dragged in from the Finder upload into the
                             // directory currently shown.
                             .on_drop(cx.listener(
-                                |this, paths: &gpui::ExternalPaths, window, cx| {
+                                |this, paths: &gpui_kit::ExternalPaths, window, cx| {
                                     this.upload_dropped(paths.paths().to_vec(), window, cx);
                                 },
                             ))
@@ -1312,7 +1315,7 @@ impl Render for Browser {
 fn render_versions(
     versions: &Arc<Vec<ObjectVersion>>,
     entry: &DirEntry,
-    browser: gpui::WeakEntity<Browser>,
+    browser: gpui_kit::WeakEntity<Browser>,
 ) -> impl IntoElement + use<> {
     let rows: Vec<_> =
         versions
@@ -1396,7 +1399,7 @@ fn render_versions(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use gpui::{TestAppContext, VisualTestContext};
+    use gpui_kit::{TestAppContext, VisualTestContext};
     use roam_core::Rt;
     use std::cell::RefCell;
     use std::time::Duration;
@@ -1409,6 +1412,9 @@ pub(crate) mod tests {
 
     impl Harness {
         pub(crate) fn new(cx: &mut TestAppContext) -> Self {
+            // These integration tests intentionally use the real Tokio IO runtime.
+            // Permit its worker threads to wake GPUI tasks through the public test API.
+            cx.background_executor.allow_parking();
             let dir = tempfile::tempdir().unwrap();
             let root = dir.path();
             std::fs::create_dir_all(root.join("documents/reports")).unwrap();
@@ -1419,7 +1425,7 @@ pub(crate) mod tests {
             std::fs::write(root.join("documents/reports/q1.xlsx"), b"xlsx").unwrap();
 
             cx.update(|cx| {
-                gpui_component::init(cx);
+                gpui_kit::init(cx);
                 crate::actions::init(cx);
             });
 
@@ -1441,9 +1447,8 @@ pub(crate) mod tests {
                     *holder.borrow_mut() = Some(browser.clone());
                     // Wrapped in `Root` on purpose: `push_notification` and the
                     // dialog layer both reach for it, and main.rs has the same
-                    // shape. On macOS this currently panics under gpui's test
-                    // platform — an upstream defect, see docs/DESIGN.md.
-                    gpui_component::Root::new(gpui::AnyView::from(browser), window, cx)
+                    // shape. Kit supports this arrangement in headless tests too.
+                    gpui_kit::component::Root::new(gpui_kit::AnyView::from(browser), window, cx)
                 })
             };
             let browser = holder.borrow().clone().expect("browser was built");
@@ -1564,7 +1569,7 @@ pub(crate) mod tests {
             let text = text.to_string();
             self.cx.update(|window, cx| {
                 let filter = browser.read(cx).filter.clone();
-                filter.update(cx, |state, cx| state.set_value(text.clone(), window, cx));
+                filter.update(cx, |state, cx| state.replace_all(text.clone(), window, cx));
             });
             self.cx.run_until_parked();
         }
@@ -1695,7 +1700,7 @@ pub(crate) mod tests {
         }
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn lists_the_root_with_directories_first(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -1708,7 +1713,7 @@ pub(crate) mod tests {
         assert_eq!(h.cwd(), "");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn double_clicking_a_directory_navigates_into_it(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -1718,7 +1723,7 @@ pub(crate) mod tests {
         assert_eq!(h.names(), vec!["reports", "contract.pdf"]);
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn double_clicking_a_file_stays_put(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -1727,7 +1732,7 @@ pub(crate) mod tests {
         assert_eq!(h.cwd(), "", "a file is not somewhere to navigate to");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn navigation_nests_two_levels_deep(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -1738,7 +1743,7 @@ pub(crate) mod tests {
         assert_eq!(h.names(), vec!["q1.xlsx"]);
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn up_goes_to_the_parent_and_stops_at_the_root(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -1757,7 +1762,7 @@ pub(crate) mod tests {
         assert_eq!(h.cwd(), "");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn back_and_forward_retrace_the_visited_path(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -1776,7 +1781,7 @@ pub(crate) mod tests {
         assert_eq!(h.cwd(), "documents/reports/");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn breadcrumbs_follow_the_current_directory(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -1796,7 +1801,7 @@ pub(crate) mod tests {
         assert_eq!(h.cwd(), "documents/");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_stale_batch_cannot_overwrite_a_newer_directory(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -1813,7 +1818,7 @@ pub(crate) mod tests {
         assert_eq!(h.names(), before, "stale batch was ignored");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn revisiting_a_directory_serves_the_cache_before_the_refresh(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -1840,9 +1845,9 @@ pub(crate) mod tests {
 #[cfg(test)]
 mod mutation_tests {
     use super::tests::*;
-    use gpui::TestAppContext;
+    use gpui_kit::TestAppContext;
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn creating_a_folder_shows_it_in_the_listing(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -1852,7 +1857,7 @@ mod mutation_tests {
         assert!(h.path().join("新文件夹").is_dir());
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_folder_name_with_a_slash_is_refused(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -1864,13 +1869,13 @@ mod mutation_tests {
         assert!(!h.path().join("a").exists());
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn an_empty_folder_name_is_refused(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         assert_eq!(h.create_folder("").unwrap_err(), "名称不能为空");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn renaming_replaces_the_row(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -1881,7 +1886,7 @@ mod mutation_tests {
         assert!(!names.contains(&"README.md".to_string()));
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn renaming_to_the_same_name_is_a_no_op(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -1890,7 +1895,7 @@ mod mutation_tests {
         assert!(h.names().contains(&"README.md".to_string()));
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn renaming_a_directory_moves_its_whole_tree(cx: &mut TestAppContext) {
         use roam_core::EntryAction;
 
@@ -1920,7 +1925,7 @@ mod mutation_tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn renaming_a_file_still_uses_the_native_rename(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -1931,7 +1936,7 @@ mod mutation_tests {
         assert!(h.transfer_snapshot().is_empty(), "no move task was needed");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn duplicating_a_file_adds_a_copy_beside_it(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -1942,7 +1947,7 @@ mod mutation_tests {
         assert!(names.contains(&"README 副本.md".to_string()));
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn duplicating_twice_does_not_overwrite_the_first_copy(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -1954,7 +1959,7 @@ mod mutation_tests {
         assert!(names.contains(&"README 副本 2.md".to_string()));
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn deleting_a_file_removes_the_row(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -1964,7 +1969,7 @@ mod mutation_tests {
         assert!(!h.path().join("notes.txt").exists());
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn deleting_a_directory_takes_its_contents(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         assert!(h.path().join("documents/reports/q1.xlsx").exists());
@@ -1975,7 +1980,7 @@ mod mutation_tests {
         assert!(!h.path().join("documents").exists(), "recursive");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_mutation_refreshes_the_listing_rather_than_serving_the_cache(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -1993,7 +1998,7 @@ mod mutation_tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn the_menu_reflects_what_the_local_backend_supports(cx: &mut TestAppContext) {
         use roam_core::EntryAction;
 
@@ -2016,7 +2021,7 @@ mod mutation_tests {
         assert!(!enabled(EntryAction::CopyShareLink));
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_directory_can_now_be_duplicated(cx: &mut TestAppContext) {
         use roam_core::EntryAction;
 
@@ -2033,7 +2038,7 @@ mod mutation_tests {
         assert_eq!(duplicate.display_label(), "创建副本");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn duplicating_a_directory_copies_its_whole_tree(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -2051,7 +2056,7 @@ mod mutation_tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn downloading_a_file_queues_a_transfer(cx: &mut TestAppContext) {
         use roam_core::TaskState;
 
@@ -2065,7 +2070,7 @@ mod mutation_tests {
         assert_eq!(&*tasks[0].label, "README.md");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn dropping_local_files_uploads_them_into_the_current_directory(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -2083,7 +2088,7 @@ mod mutation_tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn dropping_a_folder_preserves_its_structure(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -2109,9 +2114,9 @@ mod mutation_tests {
 #[cfg(test)]
 mod keyboard_tests {
     use super::tests::*;
-    use gpui::TestAppContext;
+    use gpui_kit::TestAppContext;
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn the_filter_narrows_the_visible_rows(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         assert_eq!(h.names().len(), 4);
@@ -2121,14 +2126,14 @@ mod keyboard_tests {
         assert_eq!(h.names(), vec!["README.md"]);
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn the_filter_is_case_insensitive(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         h.set_filter("REAdme");
         assert_eq!(h.names(), vec!["README.md"]);
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn clearing_the_filter_restores_every_row(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -2139,7 +2144,7 @@ mod keyboard_tests {
         assert_eq!(h.names().len(), 4, "the entries were never discarded");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn the_filter_survives_navigation_reset(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -2154,7 +2159,7 @@ mod keyboard_tests {
         assert_eq!(h.names(), vec!["contract.pdf"]);
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn enter_opens_the_selected_directory(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         h.focus_list();
@@ -2165,7 +2170,7 @@ mod keyboard_tests {
         assert_eq!(h.cwd(), "documents/");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn enter_on_a_file_does_nothing(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         h.focus_list();
@@ -2176,7 +2181,7 @@ mod keyboard_tests {
         assert_eq!(h.cwd(), "", "a file is not somewhere to navigate to");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn backspace_goes_up(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         h.double_click("documents");
@@ -2188,7 +2193,7 @@ mod keyboard_tests {
         assert_eq!(h.cwd(), "");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn cmd_bracket_retraces_history(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         h.double_click("documents");
@@ -2201,7 +2206,7 @@ mod keyboard_tests {
         assert_eq!(h.cwd(), "documents/");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn space_toggles_the_preview_panel(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         h.focus_list();
@@ -2214,7 +2219,7 @@ mod keyboard_tests {
         assert!(!h.preview_open());
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn shortcuts_do_nothing_when_no_row_is_selected(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         h.focus_list();
@@ -2225,7 +2230,7 @@ mod keyboard_tests {
         assert_eq!(h.cwd(), "");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn cmd_shift_n_opens_the_new_folder_prompt(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         h.focus_list();
@@ -2241,15 +2246,15 @@ mod keyboard_tests {
 #[cfg(test)]
 mod preview_tests {
     use super::tests::*;
-    use gpui::TestAppContext;
+    use gpui_kit::TestAppContext;
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn the_panel_starts_empty(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         assert_eq!(h.preview_state(), "idle");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn selecting_a_text_file_shows_its_contents(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -2260,7 +2265,7 @@ mod preview_tests {
         assert_eq!(h.preview_body().unwrap(), "note");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_markdown_file_is_rendered_as_markdown(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -2271,7 +2276,7 @@ mod preview_tests {
         assert_eq!(h.preview_body().unwrap(), "# readme");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_directory_says_it_has_no_preview(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -2282,7 +2287,7 @@ mod preview_tests {
         assert_eq!(h.preview_body().unwrap(), "目录没有预览");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_binary_file_is_refused_by_extension(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         h.write_file("archive.zip", b"PK\x03\x04not really");
@@ -2295,7 +2300,7 @@ mod preview_tests {
         assert_eq!(h.preview_body().unwrap(), "二进制文件，暂不预览");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn an_unlabelled_binary_is_caught_by_its_bytes(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         // Unknown extension, so classify() guesses text — the NUL byte is what
@@ -2310,7 +2315,7 @@ mod preview_tests {
         assert_eq!(h.preview_body().unwrap(), "二进制文件，暂不预览");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_large_text_file_is_truncated_and_says_so(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         let big = vec![b'a'; roam_core::preview::TEXT_LIMIT as usize + 1000];
@@ -2329,7 +2334,7 @@ mod preview_tests {
         assert!(h.preview_truncated(), "and the panel says it was cut off");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_small_file_is_not_marked_truncated(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
@@ -2339,7 +2344,7 @@ mod preview_tests {
         assert!(!h.preview_truncated());
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn moving_the_selection_replaces_the_preview(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
