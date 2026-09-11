@@ -1,6 +1,6 @@
 # Roam
 
-A cross-backend desktop file browser. Local disk, S3, GCS, Azure Blob and WebDAV
+A cross-backend desktop file browser. Local disk, S3, GCS, Azure Blob, WebDAV and NFSv3
 through one window, built on [OpenDAL] and [GPUI Kit].
 
 ```
@@ -15,9 +15,18 @@ for permission on every launch — but it means the file is not safe to sync,
 commit, or paste into an issue, and anyone who can read it has the credentials.
 
 Connections are entered through a form generated per backend: pick S3, GCS, Azure
-Blob, WebDAV or local disk and it asks for that service's fields, masks the
+Blob, WebDAV, NFS (v3) or local disk and it asks for that service's fields, masks the
 secret ones, and composes the OpenDAL URI itself. The picker lists what the build
-supports, with the same five connection types on every platform.
+supports, with the same six connection types on every platform.
+
+NFS connects directly over TCP without a system mount. Enter the server hostname
+or IP and its exported absolute path, plus optional numeric UID/GID (default
+65534) and NFS/Mount ports. If ports are omitted, they are discovered through
+rpcbind on port 111. The server must permit connections from unprivileged client
+ports and grant the supplied identity access to the export. This adapter supports
+NFSv3 with AUTH_SYS; NFSv4 and Kerberos are not supported. Symbolic links are
+listed but are not followed. Uploads use a temporary file in the destination
+directory and rename it into place only after all writes succeed.
 
 SFTP has been removed. Existing SFTP profiles remain readable and removable, but
 cannot connect or be edited. Other saved connections continue to work.

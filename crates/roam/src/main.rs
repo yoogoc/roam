@@ -1,11 +1,8 @@
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
-use gpui_kit::component::Root;
-use gpui_kit::{
-    AnyView, App, AppContext, Bounds, TitlebarOptions, Window, WindowBounds, WindowOptions, px,
-    size,
-};
+use gpui_kit::component::{Root, TitleBar};
+use gpui_kit::{AnyView, App, AppContext, Bounds, Window, WindowBounds, WindowOptions, px, size};
 use roam_core::{ProfileStore, Rt, Vfs};
 use roam_ui::{Assets, Workspace};
 
@@ -60,13 +57,10 @@ fn main() -> Result<()> {
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("Roam".into()),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
+                    ..TitleBar::window_options()
                 },
                 |window: &mut Window, cx| {
+                    window.set_window_title("Roam");
                     let workspace = cx.new(|cx| {
                         Workspace::new(rt.clone(), store.clone(), local.clone(), window, cx)
                     });

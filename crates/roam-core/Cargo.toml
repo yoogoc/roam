@@ -7,6 +7,7 @@ description = "Backend-agnostic core for Roam: VFS over OpenDAL, listing cache, 
 
 [dependencies]
 opendal.workspace = true
+nfs3_client.workspace = true
 tokio.workspace = true
 futures.workspace = true
 thiserror.workspace = true
@@ -19,6 +20,7 @@ toml.workspace = true
 directories.workspace = true
 
 [dev-dependencies]
+nfs3_server = { version = "0.11.0", features = ["memfs"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "time"] }
 tempfile = "3"
 # The S3 integration tests fetch a presigned URL with no credentials attached,

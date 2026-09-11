@@ -26,8 +26,9 @@ pub struct Profile {
     /// Stable identifier. Renaming the profile must not change it.
     pub id: ProfileId,
     pub name: String,
-    /// An OpenDAL URI: `fs:///Users/me`, `s3://bucket/prefix`,
+    /// A backend URI: `fs:///Users/me`, `s3://bucket/prefix`,
     /// `webdav://host/dav`, `gcs://bucket`, `azblob://container`.
+    /// `nfs:///` selects Roam's adapter; server/export live in options.
     pub uri: String,
     /// Everything `Operator::from_uri` needs, credentials included.
     #[serde(default)]
@@ -90,6 +91,9 @@ impl Profile {
             }
         }
 
+        if self.scheme() == "nfs" {
+            crate::nfs::NfsConfig::from_profile(self)?;
+        }
         Ok(())
     }
 

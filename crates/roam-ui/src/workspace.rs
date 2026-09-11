@@ -4,13 +4,13 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
-    ActiveTheme, Disableable, Icon, IconName, Root, Sizable, Theme, ThemeMode, WindowExt, h_flex,
-    v_flex,
+    ActiveTheme, Disableable, Icon, IconName, Root, Sizable, StyledExt, Theme, ThemeMode, TitleBar,
+    WindowExt, h_flex, v_flex,
 };
 use gpui_kit::{
     AnyElement, AppContext, ClickEvent, Context, Entity, InteractiveElement, IntoElement,
-    ParentElement, Pixels, Render, SharedString, StatefulInteractiveElement, Styled, Window, div,
-    prelude::FluentBuilder, px,
+    MouseButton, ParentElement, Pixels, Render, SharedString, StatefulInteractiveElement, Styled,
+    Window, div, prelude::FluentBuilder, px,
 };
 use roam_core::transfer::DEFAULT_CONCURRENCY;
 use roam_core::{Error, Profile, ProfileId, ProfileStore, Rt, TransferEngine, Vfs};
@@ -60,6 +60,8 @@ pub struct Workspace {
     form: Option<Entity<ConnectionForm>>,
     error: Option<Error>,
     shortcuts_open: bool,
+    connections_collapsed: bool,
+    directories_collapsed: bool,
 }
 
 impl Workspace {
@@ -134,6 +136,8 @@ impl Workspace {
             form: None,
             error,
             shortcuts_open: false,
+            connections_collapsed: false,
+            directories_collapsed: false,
         };
 
         this.open_tab(local, None, window, cx);
@@ -531,15 +535,33 @@ impl Workspace {
             .border_color(cx.theme().sidebar_border)
             .child(
                 h_flex()
-                    .px_3()
-                    .py_2()
+                    .px_2()
+                    .py_1()
                     .items_center()
                     .justify_between()
                     .child(
-                        div()
+                        Button::new("toggle-connections")
+                            .ghost()
+                            .small()
+                            .flex_1()
+                            .icon(if self.connections_collapsed {
+                                IconName::ChevronRight
+                            } else {
+                                IconName::ChevronDown
+                            })
+                            .label("连接")
+                            .child(div().flex_1())
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child("连接"),
+                            .tooltip(if self.connections_collapsed {
+                                "展开连接"
+                            } else {
+                                "折叠连接"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.connections_collapsed = !this.connections_collapsed;
+                                cx.notify();
+                            })),
                     )
                     .child(
                         Button::new("new-connection")
@@ -552,21 +574,43 @@ impl Workspace {
                             })),
                     ),
             )
-            .child(v_flex().flex_none().px_2().gap_px().children(rows))
+            .when(!self.connections_collapsed, |el| {
+                el.child(v_flex().flex_none().px_2().gap_px().children(rows))
+            })
             .child(
                 v_flex()
                     .flex_none()
                     .border_t_1()
                     .border_color(cx.theme().sidebar_border)
                     .child(
-                        div()
-                            .px_3()
-                            .py_1()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("目录"),
+                        h_flex().px_2().py_1().child(
+                            Button::new("toggle-directories")
+                                .ghost()
+                                .small()
+                                .flex_1()
+                                .icon(if self.directories_collapsed {
+                                    IconName::ChevronRight
+                                } else {
+                                    IconName::ChevronDown
+                                })
+                                .label("目录")
+                                .child(div().flex_1())
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .tooltip(if self.directories_collapsed {
+                                    "展开目录"
+                                } else {
+                                    "折叠目录"
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.directories_collapsed = !this.directories_collapsed;
+                                    cx.notify();
+                                })),
+                        ),
                     )
-                    .child(self.tree.clone()),
+                    .when(!self.directories_collapsed, |el| {
+                        el.child(self.tree.clone())
+                    }),
             )
             .child(self.render_sidebar_footer(cx))
     }
@@ -726,7 +770,7 @@ impl Workspace {
         self.select_tab(*ix, cx);
     }
 
-    fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let closable = self.tabs.len() > 1;
 
         // Each tab is labelled by its session plus where it is, since two tabs
@@ -750,6 +794,7 @@ impl Workspace {
                         .xsmall()
                         .disabled(!closable)
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            cx.stop_propagation();
                             if let Some(ix) = this.tabs.iter().position(|t| t.id == id) {
                                 this.close_tab(ix, cx);
                             }
@@ -758,28 +803,63 @@ impl Workspace {
             })
             .collect();
 
-        h_flex()
-            .w_full()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .child(
-                TabBar::new("tabs")
-                    .underline()
-                    .selected_index(self.active)
-                    .children(tabs)
-                    .on_click(cx.listener(Self::on_tab_clicked)),
-            )
-            .child(
-                Button::new("new-tab")
-                    .icon(IconName::Plus)
-                    .ghost()
-                    .xsmall()
-                    .tooltip("新标签（⌘T）")
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.action_new_tab(&NewTab, window, cx)
-                    })),
-            )
+        // The title bar's content wrapper does not shrink. Keep the tab strip
+        // out of its intrinsic width so overflow cannot push controls offscreen.
+        TitleBar::new().child(
+            div().relative().flex_1().min_w_0().h_full().child(
+                h_flex()
+                    .id("titlebar-tabs")
+                    .absolute()
+                    .inset_0()
+                    .min_w_0()
+                    .h_full()
+                    // Keep a clear window-drag target even when the tabs overflow.
+                    .mr_16()
+                    .child(
+                        h_flex()
+                            .flex_none()
+                            .pr_4()
+                            .text_sm()
+                            .font_semibold()
+                            .child("Roam"),
+                    )
+                    .child(
+                        h_flex()
+                            .id("titlebar-tab-actions")
+                            .flex_initial()
+                            .min_w_0()
+                            .h_full()
+                            // Tab clicks and double clicks must not move or zoom the window.
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(|_, _, cx| cx.stop_propagation())
+                            .child(
+                                TabBar::new("tabs")
+                                    .underline()
+                                    .small()
+                                    .flex_initial()
+                                    .min_w_0()
+                                    .h_full()
+                                    .max_width(px(180.))
+                                    .menu(closable)
+                                    .last_empty_space(div().w_0())
+                                    .selected_index(self.active)
+                                    .children(tabs)
+                                    .on_click(cx.listener(Self::on_tab_clicked)),
+                            )
+                            .child(
+                                Button::new("new-tab")
+                                    .icon(IconName::Plus)
+                                    .ghost()
+                                    .xsmall()
+                                    .flex_shrink_0()
+                                    .tooltip("新标签（⌘T）")
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                        this.action_new_tab(&NewTab, window, cx)
+                                    })),
+                            ),
+                    ),
+            ),
+        )
     }
 
     fn render_capability_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -831,7 +911,7 @@ impl Render for Workspace {
             None => format!("本机 · {}", self.active_browser().read(cx).label()),
         };
 
-        div()
+        v_flex()
             .relative()
             .size_full()
             .bg(cx.theme().background)
@@ -843,50 +923,55 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::action_close_tab))
             .on_action(cx.listener(Self::action_next_tab))
             .on_action(cx.listener(Self::action_prev_tab))
+            .child(self.render_title_bar(cx))
             .child(
-                h_flex().size_full().child(self.render_sidebar(cx)).child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .h_full()
-                        .child(
-                            h_flex()
-                                .px_3()
-                                .py_1p5()
-                                .items_center()
-                                .justify_between()
-                                .border_b_1()
-                                .border_color(cx.theme().border)
-                                .child(div().text_sm().child(title))
-                                .when_some(self.error.clone(), |el, err| {
-                                    // One line shared with the title, so the
-                                    // backend's own words go in a tooltip when
-                                    // they do not fit.
-                                    let full: SharedString = err.full_message().into();
-                                    el.child(
-                                        div()
-                                            .id("connect-error")
-                                            .text_xs()
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_color(cx.theme().danger)
-                                            .child(full.clone())
-                                            .tooltip(move |window, cx| {
-                                                Tooltip::new(full.clone()).build(window, cx)
-                                            }),
-                                    )
-                                }),
-                        )
-                        .child(self.render_tab_bar(cx))
-                        .child(self.render_capability_bar(cx))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_h_0()
-                                .child(self.active_browser().clone()),
-                        )
-                        .child(self.transfers.clone()),
-                ),
+                h_flex()
+                    .w_full()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.render_sidebar(cx))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .child(
+                                h_flex()
+                                    .px_3()
+                                    .py_1p5()
+                                    .items_center()
+                                    .justify_between()
+                                    .border_b_1()
+                                    .border_color(cx.theme().border)
+                                    .child(div().text_sm().child(title))
+                                    .when_some(self.error.clone(), |el, err| {
+                                        // One line shared with the title, so the
+                                        // backend's own words go in a tooltip when
+                                        // they do not fit.
+                                        let full: SharedString = err.full_message().into();
+                                        el.child(
+                                            div()
+                                                .id("connect-error")
+                                                .text_xs()
+                                                .min_w_0()
+                                                .truncate()
+                                                .text_color(cx.theme().danger)
+                                                .child(full.clone())
+                                                .tooltip(move |window, cx| {
+                                                    Tooltip::new(full.clone()).build(window, cx)
+                                                }),
+                                        )
+                                    }),
+                            )
+                            .child(self.render_capability_bar(cx))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .child(self.active_browser().clone()),
+                            )
+                            .child(self.transfers.clone()),
+                    ),
             )
             // Root does not draw these itself; the app's root view has to.
             .children(Root::render_dialog_layer(window, cx))
@@ -1386,6 +1471,33 @@ pub(crate) mod tests {
             text.contains("fs://"),
             "the URI is composed from the form: {text}"
         );
+    }
+
+    #[gpui_kit::test]
+    fn nfs_form_validates_and_preserves_fields_when_editing(cx: &mut TestAppContext) {
+        let mut h = Harness::new(cx);
+        h.cx.update(|window, cx| {
+            let form = cx.new(|cx| ConnectionForm::new(window, cx));
+            let profile = form.update(cx, |form, cx| {
+                form.choose_scheme("nfs", window, cx);
+                form.set_name("NAS", window, cx);
+                assert!(form.build(&[], cx).is_err());
+                form.set_field("server", "nas.local", window, cx);
+                form.set_field("export", "/volume1/share", window, cx);
+                form.set_field("uid", "1000", window, cx);
+                form.set_field("gid", "100", window, cx);
+                form.set_field("nfs_port", "2049", window, cx);
+                form.set_field("mount_port", "20048", window, cx);
+                form.build(&[], cx).unwrap()
+            });
+            assert_eq!(profile.scheme(), "nfs");
+            let edited = cx.new(|cx| ConnectionForm::editing(&profile, window, cx));
+            assert_eq!(edited.read(cx).build(&[], cx).unwrap(), profile);
+            edited.update(cx, |form, cx| {
+                form.set_field("nfs_port", "70000", window, cx);
+                assert!(form.build(&[], cx).is_err());
+            });
+        });
     }
 
     #[gpui_kit::test]

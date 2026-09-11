@@ -154,14 +154,20 @@ impl Vfs {
         // a timeout on the outside drops the retry layer's future mid-flight and
         // leaves its body state broken, and a timed-out request is never retried
         // at all, which is the opposite of what a retry layer is for.
-        let op = Operator::from_uri((profile.uri.as_str(), options))?
-            .layer(
-                TimeoutLayer::new()
-                    .with_timeout(CONTROL_TIMEOUT)
-                    .with_io_timeout(IO_TIMEOUT),
-            )
-            .layer(RetryLayer::new().with_max_times(3).with_jitter())
-            .layer(ConcurrentLimitLayer::new(32));
+        let op = if profile.scheme() == "nfs" {
+            Operator::new(crate::nfs::NfsBuilder(crate::nfs::NfsConfig::from_profile(
+                profile,
+            )?))?
+        } else {
+            Operator::from_uri((profile.uri.as_str(), options))?
+        }
+        .layer(
+            TimeoutLayer::new()
+                .with_timeout(CONTROL_TIMEOUT)
+                .with_io_timeout(IO_TIMEOUT),
+        )
+        .layer(RetryLayer::new().with_max_times(3).with_jitter())
+        .layer(ConcurrentLimitLayer::new(32));
 
         Ok(Self::from_operator(rt, op, &profile.name))
     }

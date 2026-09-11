@@ -234,7 +234,24 @@ const WEBDAV: Service = Service {
 };
 
 /// Every supported backend, in the order the picker shows them on all platforms.
-pub static SERVICES: &[Service] = &[FS, S3, GCS, AZBLOB, WEBDAV];
+pub static SERVICES: &[Service] = &[FS, S3, GCS, AZBLOB, WEBDAV, NFS];
+
+const NFS: Service = Service {
+    scheme: "nfs",
+    label: "NFS (v3)",
+    fields: &[
+        Field::text("server", "服务器", "主机名或 IP 地址，例如 nas.local").required(),
+        Field::text("export", "共享路径", "服务端导出路径，例如 /volume1/share").required(),
+        Field::text("uid", "UID", "可选，默认 65534；填写服务端用户的数字 ID"),
+        Field::text("gid", "GID", "可选，默认 65534；填写服务端用户组的数字 ID"),
+        Field::text("nfs_port", "NFS 端口", "可选，默认通过 rpcbind 自动发现"),
+        Field::text(
+            "mount_port",
+            "Mount 端口",
+            "可选，默认通过 rpcbind 自动发现",
+        ),
+    ],
+};
 
 pub fn for_scheme(scheme: &str) -> Option<&'static Service> {
     SERVICES.iter().find(|s| s.scheme == scheme)

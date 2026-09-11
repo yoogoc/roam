@@ -10,6 +10,7 @@ pub mod error;
 pub mod fmt;
 pub mod menu;
 pub mod model;
+mod nfs;
 pub mod path;
 pub mod preview;
 pub mod profile;

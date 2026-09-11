@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use gpui_kit::component::Root;
+use gpui_kit::component::{Root, TitleBar};
 use gpui_kit::{AnyView, App, AppContext, Bounds, Window, WindowBounds, WindowOptions, px, size};
 use roam_core::{ProfileStore, Rt, Vfs};
 use roam_ui::{Assets, Workspace};
@@ -33,7 +33,7 @@ fn main() {
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    ..Default::default()
+                    ..TitleBar::window_options()
                 },
                 move |window: &mut Window, cx| {
                     let workspace = cx.new(|cx| {
