@@ -21,13 +21,12 @@
 //! relying on whoever adds the next input remembering. Multi-line guidance
 //! belongs in a field's hint text, not its placeholder.
 
-pub const CONNECTION_NAME: &str = "Prod S3";
+pub const CONNECTION_NAME: &str = "例如：工作 NAS、项目文件";
 
-/// Shown under the connection form. Not a placeholder, but it lives here for the
+/// Shown in the credentials section. Not a placeholder, but it lives here for the
 /// same reason: it is user-facing text with the same single-line rule, and the
 /// test below covers it.
-pub const CREDENTIAL_STORAGE_NOTE: &str =
-    "凭据与其他选项一起保存在本机配置文件中（仅本人可读），不写入系统钥匙串。";
+pub const CREDENTIAL_STORAGE_NOTE: &str = "凭据以明文保存在本机配置文件中，文件仅当前用户可读。";
 pub const NEW_FOLDER: &str = "新文件夹";
 pub const RENAME: &str = "新名称";
 pub const FILTER: &str = "过滤当前目录";

@@ -13,10 +13,10 @@ use std::collections::BTreeMap;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Icon, IconName, StyledExt, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, App, AppContext, ClickEvent, Context, Entity, IntoElement, ParentElement, Render,
-    SharedString, Styled, Window, div, prelude::FluentBuilder,
+    SharedString, Styled, Window, div, prelude::FluentBuilder, px,
 };
 use roam_core::service::{self, Field, FieldKind, Service};
 use roam_core::{Profile, ProfileId, Result, profile};
@@ -114,7 +114,11 @@ impl ConnectionForm {
                         on: seeded == on,
                     },
                     _ => {
-                        let hint = field.hint;
+                        let hint = match field.key {
+                            "uid" | "gid" => "默认 65534",
+                            "nfs_port" | "mount_port" => "自动发现",
+                            _ => field.hint,
+                        };
                         let masked = field.is_secret();
                         let state = cx.new(|cx| {
                             let mut input = InputState::new(window, cx);
@@ -183,82 +187,238 @@ impl ConnectionForm {
     }
 }
 
-impl Render for ConnectionForm {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let scheme = self.scheme;
+/// Display copy stays in the UI; the core service schema still owns all fields.
+fn service_presentation(service: &Service) -> (&str, &str, IconName) {
+    match service.scheme {
+        "fs" => ("本机磁盘", "本地文件夹", IconName::FolderClosed),
+        "s3" => ("S3", "兼容对象存储", IconName::Inbox),
+        "gcs" => ("Google Cloud", "Cloud Storage", IconName::Globe),
+        "azblob" => ("Azure Blob", "Microsoft Azure", IconName::Building2),
+        "webdav" => ("WebDAV", "远程文件服务", IconName::Globe),
+        "nfs" => ("NFS", "网络共享 · v3", IconName::FolderClosed),
+        _ => (service.label, "", IconName::Globe),
+    }
+}
 
+fn service_description(scheme: &str) -> &'static str {
+    match scheme {
+        "fs" => "选择一个本地文件夹，作为浏览文件的起点。",
+        "s3" => "连接 AWS S3 或兼容的对象存储服务。",
+        "gcs" => "连接 Google Cloud Storage 存储桶。",
+        "azblob" => "连接 Azure Blob Storage 容器。",
+        "webdav" => "通过 WebDAV 访问服务器或 NAS 上的文件。",
+        "nfs" => "直接访问 NFSv3 共享，无需先挂载到系统。",
+        _ => "填写连接信息以开始浏览文件。",
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FieldSection {
+    Location,
+    Identity,
+    Advanced,
+}
+
+fn field_section(field: &Field) -> FieldSection {
+    match field.key {
+        "nfs_port" | "mount_port" => FieldSection::Advanced,
+        "username" | "access_key_id" | "uid" | "gid" => FieldSection::Identity,
+        _ if field.is_secret() => FieldSection::Identity,
+        _ => FieldSection::Location,
+    }
+}
+
+impl Render for ConnectionForm {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let compact = window.viewport_size().width < px(760.);
         let mut buttons = Vec::new();
         for service in service::SERVICES {
             let target = service.scheme;
+            let selected = target == self.scheme;
+            let (label, detail, icon) = service_presentation(service);
             buttons.push(
                 Button::new(SharedString::from(format!("svc-{target}")))
-                    .label(service.label)
-                    .xsmall()
-                    .when(target == scheme, |b| b.primary())
-                    .when(target != scheme, |b| b.outline())
+                    .ghost()
+                    .accessibility_label(service.label)
+                    .h(px(if compact { 36. } else { 58. }))
+                    .px_3()
+                    .when(!compact, |button| button.w_full())
+                    .when(selected, |button| button.bg(cx.theme().accent))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_3()
+                            .text_color(if selected {
+                                cx.theme().primary
+                            } else {
+                                cx.theme().muted_foreground
+                            })
+                            .child(Icon::new(icon).size_4().flex_shrink_0())
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .items_start()
+                                    .gap_1()
+                                    .child(div().text_sm().font_medium().child(label.to_string()))
+                                    .when(!compact, |el| {
+                                        el.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(detail.to_string()),
+                                        )
+                                    }),
+                            )
+                            .when(selected, |el| {
+                                el.child(Icon::new(IconName::Check).size_3().flex_shrink_0())
+                            }),
+                    )
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.set_scheme(target, window, cx)
                     })),
             );
         }
-        let picker = h_flex().gap_1().flex_wrap().children(buttons);
+        let picker = v_flex()
+            .gap_3()
+            .flex_shrink_0()
+            .when(!compact, |el| el.w(px(180.)))
+            .child(
+                div()
+                    .px_3()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("连接类型"),
+            )
+            .child(
+                v_flex()
+                    .gap_1()
+                    .when(compact, |el| el.flex_row().flex_wrap())
+                    .children(buttons),
+            );
 
-        // Snapshotted first: rendering a row installs a listener, which needs
-        // `cx` mutably, and that cannot overlap a borrow of `self.fields`.
-        let snapshot: Vec<(Field, Option<Entity<InputState>>, bool)> = self
+        // Snapshot before installing listeners, which need a mutable context.
+        let snapshot: Vec<_> = self
             .fields
             .iter()
-            .map(|input| (input.field, input.state.clone(), input.on))
+            .enumerate()
+            .map(|(ix, input)| (ix, input.field, input.state.clone(), input.on))
             .collect();
-
-        let mut rows = Vec::new();
-        for (ix, (field, state, on)) in snapshot.into_iter().enumerate() {
-            rows.push(Self::render_field(ix, field, state, on, cx));
+        let mut sections = Vec::new();
+        for (section, title) in [
+            (FieldSection::Location, "连接信息"),
+            (
+                FieldSection::Identity,
+                if self.scheme == "nfs" {
+                    "访问身份"
+                } else {
+                    "身份凭据"
+                },
+            ),
+            (FieldSection::Advanced, "高级选项"),
+        ] {
+            let inputs: Vec<_> = snapshot
+                .iter()
+                .filter(|(_, field, _, _)| field_section(field) == section)
+                .collect();
+            if inputs.is_empty() {
+                continue;
+            }
+            let paired = self.scheme == "nfs" && section != FieldSection::Location;
+            let rows: Vec<_> = inputs
+                .iter()
+                .map(|(ix, field, state, on)| {
+                    div()
+                        .min_w_0()
+                        .when(paired, |el| el.flex_1())
+                        .child(Self::render_field(*ix, *field, state.clone(), *on, cx))
+                })
+                .collect();
+            let hint = match section {
+                FieldSection::Identity if self.scheme == "nfs" => {
+                    Some("填写服务端用户和组的数字 ID，以 AUTH_SYS 身份访问共享。")
+                }
+                FieldSection::Identity
+                    if inputs.iter().any(|(_, field, _, _)| field.is_secret()) =>
+                {
+                    Some(placeholders::CREDENTIAL_STORAGE_NOTE)
+                }
+                FieldSection::Advanced => Some("通常无需修改，留空时自动发现服务端口。"),
+                _ => None,
+            };
+            sections.push(
+                v_flex()
+                    .gap_3()
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_medium()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(title),
+                            )
+                            .child(div().flex_1().h(px(1.)).bg(cx.theme().border)),
+                    )
+                    .when_some(hint, |el, hint| {
+                        el.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(hint),
+                        )
+                    })
+                    .child(
+                        v_flex()
+                            .gap_3()
+                            .when(paired, |el| el.flex_row())
+                            .children(rows),
+                    ),
+            );
         }
 
-        let name_row = labelled(
-            "名称".into(),
-            None,
-            Input::new(&self.name).into_any_element(),
-            cx,
-        );
-        let type_row = labelled("类型".into(), None, picker.into_any_element(), cx);
-        let note = div()
-            .text_xs()
-            .text_color(cx.theme().muted_foreground)
-            .child(placeholders::CREDENTIAL_STORAGE_NOTE);
+        let details = v_flex()
+            .flex_1()
+            .min_w_0()
+            .gap_5()
+            .when(!compact, |el| {
+                el.border_l_1().border_color(cx.theme().border).pl_5()
+            })
+            .when(compact, |el| {
+                el.border_t_1().border_color(cx.theme().border).pt_4()
+            })
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(div().text_lg().font_semibold().child(self.service().label))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(service_description(self.scheme)),
+                    ),
+            )
+            .child(labelled(
+                "连接名称".into(),
+                true,
+                Input::new(&self.name).into_any_element(),
+                cx,
+            ))
+            .children(sections);
 
-        // Plain and unbounded on purpose. **Do not cap this and hang a
-        // scrollbar on it** — that is what was here, twice, and it is why the
-        // form has spent its whole life silently cutting off whichever fields
-        // came last (the virtual-host toggle, then the S3 credentials).
-        //
-        // `overflow_y_scrollbar()` copies the element's `max_size` onto both
-        // the wrapper *and* the scrolled content, and the content is then laid
-        // out `h_auto`. A capped content box is exactly as tall as its own
-        // limit, so it never overflows its scroll area: no scrollbar appears,
-        // nothing scrolls, and the rows past the cap are simply clipped away.
-        //
-        // The dialog owns the height instead. `workspace::open_form` caps the
-        // popup, and gpui-component's own body wrapper — `flex_1` +
-        // `overflow_hidden` around a `size_full` scroll area, with no
-        // `max_size` on the scrollable — turns that into a real scrollbar over
-        // the whole form, with the title and the buttons staying put.
-        //
-        // The note goes above the fields rather than below them: it is about
-        // what happens to a credential, so it belongs where it is read before
-        // one is typed, not at the far end of a scroll.
-        v_flex()
-            .gap_3()
-            .child(name_row)
-            .child(type_row)
-            .child(note)
-            .children(rows)
+        // Only the dialog body scrolls. Never cap this content: a capped inner
+        // scroll wrapper clips the last fields instead of exposing overflow.
+        h_flex()
+            .w_full()
+            .items_start()
+            .gap_5()
+            .when(compact, |el| el.flex_col().items_stretch())
+            .child(picker)
+            .child(details)
     }
 }
 
 impl ConnectionForm {
-    /// Takes no `&self` on purpose — see the snapshot comment in `render`.
     fn render_field(
         ix: usize,
         field: Field,
@@ -266,57 +426,66 @@ impl ConnectionForm {
         on: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let label = if field.required {
-            format!("{} *", field.label)
-        } else {
-            field.label.to_string()
-        };
-
-        let control = match (state, field.kind) {
-            (Some(state), _) => Input::new(&state).into_any_element(),
-            (None, FieldKind::Toggle { .. }) => Switch::new(SharedString::from(format!("tg-{ix}")))
-                .checked(on)
-                .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                    if let Some(slot) = this.fields.get_mut(ix) {
-                        slot.on = *checked;
-                    }
-                    cx.notify();
-                }))
+        match (state, field.kind) {
+            (Some(state), _) => labelled(
+                field.label.into(),
+                field.required,
+                Input::new(&state).into_any_element(),
+                cx,
+            )
+            .into_any_element(),
+            (None, FieldKind::Toggle { .. }) => h_flex()
+                .items_start()
+                .gap_3()
+                .p_3()
+                .rounded_md()
+                .bg(cx.theme().secondary)
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .child(div().text_sm().child(field.label))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(field.hint),
+                        ),
+                )
+                .child(
+                    Switch::new(SharedString::from(format!("tg-{ix}")))
+                        .checked(on)
+                        .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                            if let Some(slot) = this.fields.get_mut(ix) {
+                                slot.on = *checked;
+                            }
+                            cx.notify();
+                        })),
+                )
                 .into_any_element(),
             (None, _) => div().into_any_element(),
-        };
-
-        // A toggle has no placeholder to carry its explanation, so it is the one
-        // kind that still needs a hint line; text hints ride in the placeholder.
-        let hint = match field.kind {
-            FieldKind::Toggle { .. } => Some(field.hint),
-            _ => None,
-        };
-
-        labelled(label.into(), hint, control, cx).into_any_element()
+        }
     }
 }
 
 fn labelled(
     label: SharedString,
-    hint: Option<&str>,
+    required: bool,
     control: AnyElement,
     cx: &App,
 ) -> impl IntoElement + use<> {
-    let hint = hint.filter(|h| !h.is_empty()).map(|h| h.to_string());
-
     v_flex()
-        .gap_1()
-        .child(div().text_sm().child(label))
-        .child(control)
-        .when_some(hint, |el, hint| {
-            el.child(
+        .gap_2()
+        .child(
+            h_flex().gap_2().child(div().text_sm().child(label)).child(
                 div()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child(hint),
-            )
-        })
+                    .child(if required { "必填" } else { "选填" }),
+            ),
+        )
+        .child(control)
 }
 
 #[cfg(test)]

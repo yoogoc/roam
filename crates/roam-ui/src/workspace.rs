@@ -409,14 +409,14 @@ impl Workspace {
 
             dialog
                 .title(title.clone())
-                .w(px(520.))
+                .w(px(800.).min(window.viewport_size().width - px(48.)))
                 // The one line that makes the form scrollable at all — see
                 // `dialog_max_height`.
                 .max_h(ceiling)
                 .child(form.clone())
                 // False keeps the dialog open: the form has already said what
                 // was wrong, and the input is still in it.
-                .confirm_cancel("保存", "取消", move |window, cx| {
+                .confirm_cancel("保存并连接", "取消", move |window, cx| {
                     this.update(cx, |workspace, cx| workspace.save_form(window, cx))
                         .unwrap_or(false)
                 })

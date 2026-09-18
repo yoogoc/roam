@@ -7,6 +7,7 @@
 //! dialog fails to lay out, the process aborts instead of staying up.
 //!
 //!     cargo run -p roam-ui --example connection_dialog
+//!     cargo run -p roam-ui --example connection_dialog -- --compact
 
 use std::sync::Arc;
 
@@ -16,6 +17,11 @@ use roam_core::{ProfileStore, Rt, Vfs};
 use roam_ui::{Assets, Workspace};
 
 fn main() {
+    let width = if std::env::args().any(|arg| arg == "--compact") {
+        640.
+    } else {
+        900.
+    };
     let rt = Rt::new().expect("tokio runtime");
     let temp = std::env::temp_dir();
     let local = Vfs::local(rt.clone(), temp.to_str().unwrap()).expect("local session");
@@ -28,7 +34,7 @@ fn main() {
             // Installs the keyboard bindings; without it every shortcut is inert.
             roam_ui::init(cx);
 
-            let bounds = Bounds::centered(None, size(px(900.), px(640.)), cx);
+            let bounds = Bounds::centered(None, size(px(width), px(640.)), cx);
 
             cx.open_window(
                 WindowOptions {
