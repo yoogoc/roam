@@ -309,7 +309,14 @@ case "${1:-up}" in
     down)
         docker rm -f roam-rustfs roam-azurite roam-gcs roam-dav \
             >/dev/null 2>&1 || true
-        rm -rf "$DATA"
+        # Container processes use their own UIDs, so bind-mounted files may not
+        # be removable by the host user (RustFS writes xl.meta as uid 10001).
+        # Keep that expected failure concise; CI can retry the disposable data
+        # directory with its passwordless sudo.
+        if ! rm -rf "$DATA" 2>/dev/null; then
+            echo "cannot remove container-owned test data: $DATA" >&2
+            exit 1
+        fi
         echo "stopped and removed the test backends"
         ;;
     *)

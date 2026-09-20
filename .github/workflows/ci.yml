@@ -57,7 +57,12 @@ jobs:
 
       - name: Stop the backend servers
         if: always()
-        run: scripts/test-backends.sh down
+        run: |
+          if ! scripts/test-backends.sh down; then
+            # RustFS writes bind-mounted metadata as uid 10001. Hosted runners
+            # provide passwordless sudo for cleaning this disposable directory.
+            sudo rm -rf -- "$GITHUB_WORKSPACE/target/test-backends"
+          fi
 
   # The view layer needs gpui, so this runs where the app is actually developed
   # and shipped. Keeping it separate means a core-only change gets its answer
