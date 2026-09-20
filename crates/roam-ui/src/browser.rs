@@ -1303,7 +1303,11 @@ impl Render for Browser {
                                     this.upload_dropped(paths.paths().to_vec(), window, cx);
                                 },
                             ))
-                            .child(DataTable::new(&self.table).stripe(true)),
+                            // The table fills the pane edge to edge. Its default
+                            // rounded outline clashes with the pane's square
+                            // dividers and creates doubled borders at the
+                            // toolbar and status bar.
+                            .child(DataTable::new(&self.table).stripe(true).bordered(false)),
                     )
                     .when(self.preview_open, |el| el.child(self.preview.clone())),
             )
