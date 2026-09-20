@@ -39,11 +39,10 @@ homepage = "https://github.com/yoogoc/roam"
 authors = ["yoogo"]
 category = "Utility"
 
-# cargo-packager packages a binary, it never builds one — so the build has to be
-# named here. The hook runs through `sh -c`, so the expansion below is real: unset
-# locally it builds for the host, and CI sets ROAM_BUILD_TARGET to cross-compile.
-# One command that is correct in both places, rather than two that drift.
-before-packaging-command = "cargo build --release -p roam ${ROAM_BUILD_TARGET:+--target $ROAM_BUILD_TARGET}"
+# cargo-packager packages an existing binary; it does not build one. Keep the
+# build as an explicit step in local instructions and CI. A hook cannot express
+# an optional target portably because cargo-packager invokes it through `sh` on
+# Unix and `cmd.exe` on Windows.
 binaries = [{ path = "roam", main = true }]
 
 # The packager picks what each platform needs out of this list: .icns for macOS,

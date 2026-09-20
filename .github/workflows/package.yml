@@ -98,12 +98,14 @@ jobs:
       - name: Install cargo-packager
         run: cargo install cargo-packager --locked
 
-      # `before-packaging-command` reads ROAM_BUILD_TARGET and adds `--target` when
-      # it is set, so the same one command builds natively here and cross-compiles
-      # for the Intel mac.
+      # Build explicitly instead of relying on cargo-packager's shell hook. Hooks
+      # run through `sh` on Unix and `cmd.exe` on Windows, so optional-target shell
+      # expansion cannot be portable across the matrix.
+      - name: Build application
+        run: cargo build --release -p roam --target ${{ matrix.target }}
+
       - name: Package
         env:
-          ROAM_BUILD_TARGET: ${{ matrix.target }}
           # linuxdeploy mounts its own AppImage to run, which needs FUSE. Without
           # this it dies with `terminate called after throwing an instance of
           # 'std::logic_error'` — measured in a container, and runners hit the same

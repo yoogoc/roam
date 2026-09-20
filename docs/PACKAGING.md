@@ -7,6 +7,7 @@
 ```sh
 cargo install cargo-packager --locked
 
+cargo build --release -p roam
 cargo packager -p roam --release --formats app,dmg   # macOS
 cargo packager -p roam --release --formats deb,appimage
 cargo packager -p roam --release --formats nsis      # 或 wix
@@ -46,19 +47,16 @@ signing-identity = "Developer ID Application: NAME (TEAMID)"
 CI 上导入证书用 `APPLE_CERTIFICATE`（base64 的 .p12）+ `APPLE_CERTIFICATE_PASSWORD`，
 不必自己折腾临时钥匙串。
 
-## 构建由 cargo-packager 触发
+## 构建与打包分开执行
 
-cargo-packager 只打包、**不构建**，所以 `before-packaging-command` 里写的是
-`cargo build --release -p roam`。产出跟着**当前机器的架构**走 —— 现在是 arm64，DMG 名字
-里的 `aarch64` 就是它。
+cargo-packager 只打包、**不构建**，因此先显式执行 `cargo build --release -p roam`，
+再运行 cargo-packager。产出跟着**当前机器的架构**走 —— 现在是 arm64，DMG 名字里的
+`aarch64` 就是它。
 
 不做 universal：那意味着把整棵依赖树（含 gpui）编两遍再 `lipo`，对一个"在哪台机器上构建
 就在哪台机器上跑"的工具不值得。真要做的话，是加一个先构建两个 target 再 lipo 到
-`target/release/roam` 的脚本，把 `before-packaging-command` 指向它 —— cargo-packager 本身
-没有 universal 的概念。
-
-注意 `before-packaging-command` 的工作目录是**包目录**（`crates/roam`）而不是仓库根；这里
-用 `cargo build` 不受影响，但换成脚本路径时要算进去。
+`target/release/roam` 的脚本，再让 cargo-packager 使用合并后的二进制 —— cargo-packager
+本身没有 universal 的概念。
 
 ## 图标
 
@@ -108,8 +106,10 @@ Intel mac 用**交叉编译**而不是申请 Intel runner：macOS SDK 两个架�
 runner 正在退役。本机实测过这条路 —— 产物落在 `target/x86_64-apple-darwin/release/`，
 所以工作流里的上传路径统一用 triple 目录。
 
-`before-packaging-command` 会读 `ROAM_BUILD_TARGET`，有值就加 `--target`。因此**同一条
-命令**在本地（不设变量，构建 host）和 CI（设了变量，交叉编译）都是对的，不需要维护两套。
+CI 先用矩阵里的 target 显式执行
+`cargo build --release -p roam --target <triple>`，再把同一个 target 传给 cargo-packager。
+构建步骤不放在 cargo-packager hook 中：hook 在 Unix 上通过 `sh` 执行，在 Windows 上通过
+`cmd.exe` 执行，依赖 shell 变量展开会让其中一侧直接失败。
 
 **没有验证过的平台标了 `continue-on-error: true`。** 那不是为了让徽章好看：已验证的平台
 一旦坏掉照样让整个 run 变红，而没建过的平台不会把它掩盖掉。每个 `true` 都是一句关于
@@ -162,7 +162,8 @@ AppImage 的工具链在两个架构下都齐：`AppRun-{x86_64,aarch64}`、
 
 **历史验证记录**（迁移前在本机完成，不代表新版依赖的打包结果）：
 
-- `cargo packager -p roam --release --formats app,dmg` 一条命令产出 `Roam.app`（arm64）
+- `cargo build --release -p roam` 后运行
+  `cargo packager -p roam --release --formats app,dmg`，产出 `Roam.app`（arm64）
   与 13 MB 的 `Roam_0.1.0_aarch64.dmg`；
 - Info.plist：`CFBundleIdentifier=dev.roam.Roam`（与 roam-core 里
   `ProjectDirs::from("dev","roam","Roam")` 一致，改它会让已有配置失联）、
