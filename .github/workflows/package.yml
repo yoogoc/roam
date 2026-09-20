@@ -129,21 +129,43 @@ jobs:
             target/${{ matrix.target }}/release/*.msi
           if-no-files-found: error
 
-  # Only on a tag, and only from artifacts that were actually produced.
+  # Main pushes publish a prerelease; version tags publish a normal release.
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     needs: package
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
+      - name: Describe release
+        id: release
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            echo "name=Roam $GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "make_latest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=main-$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+            echo "name=Roam main ${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "make_latest=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
 
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.release.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ steps.release.outputs.name }}
+          prerelease: ${{ steps.release.outputs.prerelease }}
+          make_latest: ${{ steps.release.outputs.make_latest }}
+          generate_release_notes: true
           files: artifacts/**/*
-          # A tag whose packages are missing a platform is better published
+          # A release whose packages are missing a platform is better published
           # incomplete than not published at all — the matrix says which failed.
           fail_on_unmatched_files: false

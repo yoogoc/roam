@@ -82,16 +82,17 @@ env -u all_proxy -u ALL_PROXY cargo packager -p roam --release --formats dmg
 里**没有 LICENSE 文件**。配置里因此没有 `license-file`；要发布的话这个得补上（涉及版权
 署名，留给你定）。
 
-## CI：push 时自动打六个包
+## CI：push 时自动打包并发布
 
 `.github/workflows/package.yml`，矩阵是 mac / windows / linux × amd64 / arm64。
 
-触发限定在 **push 到 main、打 tag、以及手动 dispatch** —— 不是所有分支。每个矩阵项都是
-一次完整的依赖树构建（含 gpui），六份并行；特性分支不需要安装包。打 tag 时额外有一个
-`release` job 把产物挂到 GitHub Release 上。
+触发限定在 **push 到 main、push `v*` tag、以及手动 dispatch** —— 不是所有分支。每个矩阵
+项都是一次完整的依赖树构建（含 gpui），六份并行；特性分支不需要安装包。push 到 main 时，
+`release` job 会创建 `main-<完整 commit SHA>` 标签对应的 prerelease，并挂上本次产物；显示名
+使用七位短 SHA。push `v*` tag 时则创建正式 Release 并标记为 latest。手动 dispatch 只保留
+Actions artifact，不发布 Release。
 
-下表的"状态"一律指**在本机验证到哪一步**。**这份 workflow 本身从未在 runner 上跑过**
-（仓库还没有 remote），所以任何一行都不代表"CI 上验证过"。
+下表的"状态"一律指**在本机验证到哪一步**；各平台当前的 CI 结果以 GitHub Actions 为准。
 
 | 矩阵项 | runner | 格式 | 本机验证到哪 |
 | --- | --- | --- | --- |
