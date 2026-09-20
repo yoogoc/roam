@@ -6472,7 +6472,9 @@ dependencies = [
  "jiff",
  "resvg 0.46.0",
  "roam-core",
+ "serde",
  "tempfile",
+ "toml 1.1.4+spec-1.1.0",
  "tracing",
 ]
 

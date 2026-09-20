@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -8,18 +9,21 @@ use gpui_kit::component::{
     WindowExt, h_flex, v_flex,
 };
 use gpui_kit::{
-    AnyElement, AppContext, ClickEvent, Context, Entity, InteractiveElement, IntoElement,
+    AnyElement, App, AppContext, ClickEvent, Context, Entity, InteractiveElement, IntoElement,
     MouseButton, ParentElement, Pixels, Render, SharedString, StatefulInteractiveElement, Styled,
-    Window, div, prelude::FluentBuilder, px,
+    Subscription, Window, div, prelude::FluentBuilder, px,
 };
 use roam_core::transfer::DEFAULT_CONCURRENCY;
 use roam_core::{Error, Profile, ProfileId, ProfileStore, Rt, TransferEngine, Vfs};
 
-use crate::actions::{CloseTab, NewTab, NextTab, PrevTab, WORKSPACE_CONTEXT};
+use crate::actions::{
+    self, CloseTab, NewTab, NextTab, PrevTab, QuitApp, ShortcutSettings, WORKSPACE_CONTEXT,
+};
 use crate::browser::Browser;
 use crate::connection_form::ConnectionForm;
 use crate::dialog::DialogButtons;
 use crate::dir_tree::DirTreeView;
+use crate::shortcut_settings::ShortcutSettingsForm;
 use crate::transfer_panel::TransferPanel;
 
 /// Identifies the always-present local session, which has no saved profile.
@@ -58,13 +62,76 @@ pub struct Workspace {
     /// them and can span two sessions.
     transfers: Entity<TransferPanel>,
     form: Option<Entity<ConnectionForm>>,
+    shortcut_settings: ShortcutSettings,
+    shortcut_settings_path: PathBuf,
+    shortcut_interceptor: Option<Subscription>,
     error: Option<Error>,
-    shortcuts_open: bool,
     connections_collapsed: bool,
     directories_collapsed: bool,
 }
 
 impl Workspace {
+    /// Native application menus dispatch without a view focus path. Register
+    /// these two handlers globally so Command-W and Command-Q still reach the
+    /// workspace confirmation dialogs on macOS.
+    pub fn register_global_actions(workspace: &Entity<Self>, window: &Window, cx: &mut App) {
+        let window_handle = window.window_handle();
+        let close = workspace.downgrade();
+        cx.on_action(move |_: &CloseTab, cx| {
+            let close = close.clone();
+            let _ = window_handle.update(cx, move |_, window, cx| {
+                let _ = close.update(cx, |workspace, cx| {
+                    workspace.action_close_tab(&CloseTab, window, cx)
+                });
+            });
+        });
+
+        let window_handle = window.window_handle();
+        let quit = workspace.downgrade();
+        cx.on_action(move |_: &QuitApp, cx| {
+            let quit = quit.clone();
+            let _ = window_handle.update(cx, move |_, window, cx| {
+                let _ = quit.update(cx, |workspace, cx| {
+                    workspace.action_quit_app(&QuitApp, window, cx)
+                });
+            });
+        });
+
+        // Command-W is claimed by the native window system before ordinary
+        // action dispatch on macOS. Intercept the configured close and quit
+        // chords first, then stop propagation so neither can bypass its dialog.
+        let shortcuts = workspace.downgrade();
+        let subscription = cx.intercept_keystrokes(move |event, window, cx| {
+            let stroke = event.keystroke.unparse().to_ascii_lowercase();
+            let _ = shortcuts.update(cx, |workspace, cx| {
+                let close = workspace
+                    .shortcut_settings
+                    .get("close_tab")
+                    .eq_ignore_ascii_case(&stroke);
+                let quit = workspace
+                    .shortcut_settings
+                    .get("quit_app")
+                    .eq_ignore_ascii_case(&stroke);
+                if !close && !quit {
+                    return;
+                }
+
+                cx.stop_propagation();
+                if window.has_active_dialog(cx) {
+                    return;
+                }
+                if close {
+                    workspace.confirm_close_tab(workspace.active, window, cx);
+                } else {
+                    workspace.confirm_quit(window, cx);
+                }
+            });
+        });
+        workspace.update(cx, |workspace, _| {
+            workspace.shortcut_interceptor = Some(subscription)
+        });
+    }
+
     pub fn new(
         rt: Rt,
         store: Arc<ProfileStore>,
@@ -94,6 +161,17 @@ impl Workspace {
             Err(err) => {
                 tracing::warn!(error = %err.full_message(), "failed to load profiles");
                 (Vec::new(), Some(err))
+            }
+        };
+
+        let shortcut_settings_path = ShortcutSettings::path_for_profiles(store.path());
+        let shortcut_settings = match ShortcutSettings::load(&shortcut_settings_path) {
+            Ok(settings) => settings,
+            Err(err) => {
+                if error.is_none() {
+                    error = Some(err);
+                }
+                ShortcutSettings::default()
             }
         };
 
@@ -134,8 +212,10 @@ impl Workspace {
             tree,
             transfers,
             form: None,
+            shortcut_settings,
+            shortcut_settings_path,
+            shortcut_interceptor: None,
             error,
-            shortcuts_open: false,
             connections_collapsed: false,
             directories_collapsed: false,
         };
@@ -214,8 +294,55 @@ impl Workspace {
         browser.update(cx, |browser, cx| browser.navigate_to_dir(&cwd, cx));
     }
 
-    fn action_close_tab(&mut self, _: &CloseTab, _: &mut Window, cx: &mut Context<Self>) {
-        self.close_tab(self.active, cx);
+    fn action_close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm_close_tab(self.active, window, cx);
+    }
+
+    fn action_quit_app(&mut self, _: &QuitApp, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm_quit(window, cx);
+    }
+
+    fn confirm_close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tabs.len() <= 1 || ix >= self.tabs.len() {
+            window.push_notification("至少需要保留一个标签页；退出应用请使用退出快捷键", cx);
+            return;
+        }
+
+        let browser = self.tabs[ix].browser.read(cx);
+        let name: SharedString = format!("{} · {}", browser.label(), browser.cwd()).into();
+        let this = cx.weak_entity();
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let this = this.clone();
+            dialog
+                .title("关闭标签页？")
+                .w(px(440.))
+                .child(
+                    div()
+                        .text_sm()
+                        .child(format!("将关闭「{name}」，当前浏览位置不会保留。")),
+                )
+                .confirm_cancel("关闭标签页", "取消", move |_window, cx| {
+                    this.update(cx, |workspace, cx| workspace.close_tab(ix, cx))
+                        .is_ok()
+                })
+        });
+    }
+
+    fn confirm_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.open_dialog(cx, |dialog, _window, _cx| {
+            dialog
+                .title("退出 Roam？")
+                .w(px(420.))
+                .child(
+                    div()
+                        .text_sm()
+                        .child("所有标签页都将关闭，正在进行的传输会停止。"),
+                )
+                .confirm_cancel("退出应用", "取消", |_window, cx| {
+                    cx.quit();
+                    true
+                })
+        });
     }
 
     fn close_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -648,36 +775,56 @@ impl Workspace {
                             })),
                     )
                     .child(
-                        Button::new("toggle-shortcuts")
-                            .icon(IconName::Info)
+                        Button::new("open-settings")
+                            .icon(IconName::Settings2)
                             .ghost()
                             .small()
-                            .tooltip("快捷键")
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.shortcuts_open = !this.shortcuts_open;
-                                cx.notify();
+                            .tooltip("设置")
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.open_settings(window, cx);
                             })),
                     ),
             )
-            .when(self.shortcuts_open, |el| {
-                // Shortcuts are undiscoverable otherwise; this is cheaper than a
-                // separate help window and stays next to what it describes.
-                el.child(
-                    v_flex()
-                        .px_2()
-                        .pb_2()
-                        .gap_px()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .children(crate::actions::SHORTCUT_HINTS.iter().map(|(label, keys)| {
-                            h_flex()
-                                .justify_between()
-                                .gap_2()
-                                .child(*label)
-                                .child(*keys)
-                        })),
-                )
-            })
+    }
+
+    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let settings = self.shortcut_settings.clone();
+        let form = cx.new(|cx| ShortcutSettingsForm::new(&settings, window, cx));
+        let this = cx.weak_entity();
+
+        window.open_dialog(cx, move |dialog, window, _cx| {
+            let form = form.clone();
+            let this = this.clone();
+            dialog
+                .title("设置 · 快捷键")
+                .w(px(640.).min(window.viewport_size().width - px(48.)))
+                .max_h(dialog_max_height(window.viewport_size().height))
+                .child(form.clone())
+                .confirm_cancel("保存", "取消", move |window, cx| {
+                    let settings = form.read(cx).settings(cx);
+                    this.update(cx, |workspace, cx| {
+                        workspace.save_shortcut_settings(settings, window, cx)
+                    })
+                    .unwrap_or(false)
+                })
+        });
+    }
+
+    fn save_shortcut_settings(
+        &mut self,
+        settings: ShortcutSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if let Err(error) = settings.save(&self.shortcut_settings_path) {
+            window.push_notification(error.full_message(), cx);
+            return false;
+        }
+
+        actions::rebind(cx, &self.shortcut_settings, &settings);
+        self.shortcut_settings = settings;
+        window.push_notification("快捷键设置已保存并生效", cx);
+        true
     }
 
     fn render_sidebar_row(
@@ -793,10 +940,10 @@ impl Workspace {
                         .ghost()
                         .xsmall()
                         .disabled(!closable)
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             cx.stop_propagation();
                             if let Some(ix) = this.tabs.iter().position(|t| t.id == id) {
-                                this.close_tab(ix, cx);
+                                this.confirm_close_tab(ix, window, cx);
                             }
                         })),
                 )
@@ -852,7 +999,7 @@ impl Workspace {
                                     .ghost()
                                     .xsmall()
                                     .flex_shrink_0()
-                                    .tooltip("新标签（⌘T）")
+                                    .tooltip("新标签")
                                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                         this.action_new_tab(&NewTab, window, cx)
                                     })),
@@ -923,6 +1070,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::action_close_tab))
             .on_action(cx.listener(Self::action_next_tab))
             .on_action(cx.listener(Self::action_prev_tab))
+            .on_action(cx.listener(Self::action_quit_app))
             .child(self.render_title_bar(cx))
             .child(
                 h_flex()
@@ -1183,10 +1331,8 @@ pub(crate) mod tests {
 
         pub(crate) fn close_active_tab(&mut self) {
             let workspace = self.workspace.clone();
-            self.cx.update(|window, cx| {
-                workspace.update(cx, |w, cx| {
-                    w.action_close_tab(&crate::actions::CloseTab, window, cx)
-                });
+            self.cx.update(|_, cx| {
+                workspace.update(cx, |w, cx| w.close_tab(w.active, cx));
             });
             self.settle();
         }

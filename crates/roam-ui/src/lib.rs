@@ -13,10 +13,11 @@ mod dir_tree;
 mod name_dialog;
 pub mod placeholders;
 mod preview;
+mod shortcut_settings;
 mod transfer_panel;
 mod workspace;
 
-pub use actions::init;
+pub use actions::{ShortcutSettings, init, init_with_shortcuts};
 pub use assets::Assets;
 pub use browser::Browser;
 pub use connection_form::ConnectionForm;

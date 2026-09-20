@@ -4,7 +4,7 @@ use anyhow::{Context as _, Result};
 use gpui_kit::component::{Root, TitleBar};
 use gpui_kit::{AnyView, App, AppContext, Bounds, Window, WindowBounds, WindowOptions, px, size};
 use roam_core::{ProfileStore, Rt, Vfs};
-use roam_ui::{Assets, Workspace};
+use roam_ui::{Assets, ShortcutSettings, Workspace};
 
 /// The always-available local session. Saved connections come from
 /// `profiles.toml`; this one needs no configuration so the app is useful on
@@ -42,6 +42,11 @@ fn main() -> Result<()> {
     let rt = Rt::new()?;
     let local = Vfs::local(rt.clone(), &root)?;
     let store = Arc::new(profile_store()?);
+    let shortcut_path = ShortcutSettings::path_for_profiles(store.path());
+    let shortcuts = ShortcutSettings::load(&shortcut_path).unwrap_or_else(|error| {
+        tracing::warn!(error = %error.full_message(), "failed to load shortcut settings");
+        ShortcutSettings::default()
+    });
 
     tracing::info!(root = %root, profiles = %store.path().display(), "opening roam");
 
@@ -50,7 +55,7 @@ fn main() -> Result<()> {
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
             // Installs the keyboard bindings; without it every shortcut is inert.
-            roam_ui::init(cx);
+            roam_ui::init_with_shortcuts(cx, &shortcuts);
 
             let bounds = Bounds::centered(None, size(px(1180.), px(760.)), cx);
 
@@ -64,6 +69,7 @@ fn main() -> Result<()> {
                     let workspace = cx.new(|cx| {
                         Workspace::new(rt.clone(), store.clone(), local.clone(), window, cx)
                     });
+                    Workspace::register_global_actions(&workspace, window, cx);
                     cx.new(|cx| Root::new(AnyView::from(workspace), window, cx))
                 },
             )

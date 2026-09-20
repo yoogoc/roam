@@ -1093,9 +1093,9 @@ impl Browser {
                     .ghost()
                     .small()
                     .tooltip(if show_hidden {
-                        "隐藏点文件（⌘⇧.）"
+                        "隐藏点文件"
                     } else {
-                        "显示点文件（⌘⇧.）"
+                        "显示点文件"
                     })
                     .selected(show_hidden)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_hidden(cx))),
