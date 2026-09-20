@@ -174,7 +174,7 @@ const S3: Service = Service {
         Field::text(
             "enable_virtual_host_style",
             "使用 virtual-host 寻址",
-            "AWS 与阿里云 OSS 等需要打开，MinIO 等自建服务保持关闭",
+            "AWS 与阿里云 OSS 等需要打开，RustFS 等自建服务保持关闭",
         )
         .toggle("true", "false"),
         // Required, unlike the credentials: OpenDAL's S3 builder fails with
@@ -381,7 +381,7 @@ mod tests {
     fn s3_composes_bucket_and_prefix_into_the_uri() {
         let profile = build_profile(
             "p".into(),
-            "MinIO".into(),
+            "RustFS".into(),
             "s3",
             &values(&[
                 ("bucket", "roam-test"),
@@ -464,7 +464,7 @@ mod tests {
     fn round_trips_through_field_values() {
         let original = build_profile(
             "p".into(),
-            "MinIO".into(),
+            "RustFS".into(),
             "s3",
             &values(&[
                 ("bucket", "b"),
@@ -556,7 +556,7 @@ mod round_trip_tests {
     /// when nothing was edited.
     #[test]
     fn editing_without_changing_anything_leaves_the_profile_identical() {
-        let mut original = Profile::new("p", "MinIO", "s3://bucket/data");
+        let mut original = Profile::new("p", "RustFS", "s3://bucket/data");
         original.options.insert("region".into(), "us-east-1".into());
         original
             .options

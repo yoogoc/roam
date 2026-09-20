@@ -24,6 +24,7 @@ DAV_PORT=18080
 BUCKET=roam-test
 KEY=roamtest
 SECRET=roamtest-secret
+RUSTFS_IMAGE=${RUSTFS_IMAGE:-rustfs/rustfs:1.0.0}
 
 # Azurite's well-known development credentials.
 AZ_ACCOUNT=devstoreaccount1
@@ -31,8 +32,8 @@ AZ_KEY='Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOt
 
 # Deliberately inside the repo rather than under $TMPDIR. On macOS, TMPDIR is
 # /var/folders/..., which Docker Desktop does not share by default — the bind
-# mount then silently resolves to nothing and MinIO reports
-# "Unable to use the drive /data: drive not found". `target/` is already
+# mount then silently resolves to nothing and the storage server cannot open
+# `/data`. `target/` is already
 # gitignored and is under a path Docker can see.
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DATA="${ROAM_TEST_DATA:-$REPO_ROOT/target/test-backends}"
@@ -69,8 +70,7 @@ start() {
 
     # Reuse only a *running* container. A stopped one is recreated instead of
     # restarted: `down` deletes the data directory, so an old container's bind
-    # mount would point at a path that no longer holds what it expects — MinIO
-    # answers that with "Unable to use the drive /data".
+    # mount would point at a path that no longer holds what it expects.
     if [ -n "$(docker ps -q -f name="^${name}$")" ]; then
         return 0
     fi
@@ -80,18 +80,21 @@ start() {
 
 up_s3() {
     # The bucket is created through the S3 API below, not by making a directory
-    # under the data dir. MinIO does turn a top-level directory into a bucket,
-    # but that only works when we and the daemon see the same filesystem — a
-    # runner that executes steps inside a container does not, and the failure
-    # arrives much later as NoSuchBucket from every single test.
-    mkdir -p "$DATA/minio"
-    start roam-minio \
+    # under the data dir. That keeps setup independent of the server's on-disk
+    # layout and works when a runner executes steps inside a container.
+    mkdir -p "$DATA/rustfs"
+    # RustFS runs as uid 10001. This is disposable test data under target/, so
+    # make the bind mount writable without requiring root or changing host
+    # ownership to a uid that may not exist locally.
+    chmod 0777 "$DATA/rustfs"
+    start roam-rustfs \
         -p "${S3_PORT}:9000" \
-        -e "MINIO_ROOT_USER=$KEY" \
-        -e "MINIO_ROOT_PASSWORD=$SECRET" \
-        -v "$DATA/minio:/data" \
-        minio/minio server /data
-    wait_for minio "http://127.0.0.1:${S3_PORT}/minio/health/live"
+        -e "RUSTFS_VOLUMES=/data" \
+        -e "RUSTFS_ACCESS_KEY=$KEY" \
+        -e "RUSTFS_SECRET_KEY=$SECRET" \
+        -v "$DATA/rustfs:/data" \
+        "$RUSTFS_IMAGE"
+    wait_for rustfs "http://127.0.0.1:${S3_PORT}/health/ready"
 
     # Create the bucket, then turn on versioning so the version-history tests
     # have history to browse. Without versioning they skip, which would look
@@ -304,7 +307,7 @@ case "${1:-up}" in
         fi
         ;;
     down)
-        docker rm -f roam-minio roam-azurite roam-gcs roam-dav \
+        docker rm -f roam-rustfs roam-azurite roam-gcs roam-dav \
             >/dev/null 2>&1 || true
         rm -rf "$DATA"
         echo "stopped and removed the test backends"

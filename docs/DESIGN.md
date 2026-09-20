@@ -245,7 +245,7 @@ let op = Operator::from_uri((profile.uri.as_str(), options))?
 
 存储说明从表单底部挪到字段**上面**:它讲的是凭据会被怎么存,该在人输入凭据之前读到,而不是在滚动的另一头。
 
-验证:表单在真实平台文本栈下打开过（`examples/connection_dialog`,现在直接打开 **S3** 这个最高的表单 —— 窗口 672px 高时对话框上限约 538px,而 7 个带标签的字段连同名称 / 类型 / 说明约 690px,所以这个例子真的触发了滚动而非空跑;窗口 900×672,无 abort —— 掩码输入和开关都是新东西,而 placeholder 那次崩溃的教训就是这类排版问题只在真实文本栈下暴露);另有一条**闭环测试**（`a_profile_built_the_way_the_form_builds_it_connects`）把「人会输入的值 → `build_profile` → 真实 MinIO 上传并列举」整条走通 —— 其余测试都是手搓 profile,只验证了 schema 自己,没验证过它对服务器是否成立。
+验证:表单在真实平台文本栈下打开过（`examples/connection_dialog`,现在直接打开 **S3** 这个最高的表单 —— 窗口 672px 高时对话框上限约 538px,而 7 个带标签的字段连同名称 / 类型 / 说明约 690px,所以这个例子真的触发了滚动而非空跑;窗口 900×672,无 abort —— 掩码输入和开关都是新东西,而 placeholder 那次崩溃的教训就是这类排版问题只在真实文本栈下暴露);另有一条**闭环测试**（`a_profile_built_the_way_the_form_builds_it_connects`）把「人会输入的值 → `build_profile` → 真实 RustFS 上传并列举」整条走通 —— 其余测试都是手搓 profile,只验证了 schema 自己,没验证过它对服务器是否成立。
 
 ---
 
@@ -606,7 +606,7 @@ there is no reactor running, must be called from the context of a Tokio 1.x runt
 
 前五个里程碑的代码**从未面对真实网络** —— 所有测试都跑在 OpenDAL 的本地 `fs` service 上，签名、XML 解析、列举分页、multipart、presign 一行都没真正执行过。这是当时最大的未知。
 
-它不需要真实云凭据：本地跑对应的兼容服务就够了，HTTP 路径是真的。`scripts/test-backends.sh` 负责起停四个后端（MinIO / Azurite / fake-gcs-server / WebDAV）：
+它不需要真实云凭据：本地跑对应的兼容服务就够了，HTTP 路径是真的。`scripts/test-backends.sh` 负责起停四个后端（RustFS / Azurite / fake-gcs-server / WebDAV）：
 
 ```
 scripts/test-backends.sh test all       # 起全部服务并跑集成测试
@@ -638,7 +638,7 @@ scripts/test-backends.sh down           # 停掉并清理
 
 **S3 全部一次通过，代码没有改动。** 但接上 azblob / gcs / webdav 之后就不是了 —— 见下面两条。
 
-配置上唯一的坑：MinIO 用 path-style 寻址，profile 里要 `enable_virtual_host_style = false`；真实 AWS S3 不需要。
+配置上唯一的坑：RustFS 用 path-style 寻址，profile 里要 `enable_virtual_host_style = false`；真实 AWS S3 不需要。
 
 ### 各后端真实上报的 capability
 
@@ -714,7 +714,7 @@ OpenDAL 的 GCS 并发 writer 走 **XML API** 的 multipart 端点（`POST ...?u
 
 如果把 412 当失败，一个本来可以续传的下载就变成硬错误。**412 的正确含义是「你的分片过期了」，所以应该退回整体重下。** 现在就是这么做的：最坏情况是重新下载，永远不会因此失败。
 
-这两条都是只有真实服务器才会暴露的东西 —— 我第一版实现在 MinIO 上全绿，接上 Apache 才炸。顺带说明另一件事：我最初还在**每次**下载都发 `If-Match`（包括没有分片要保护的全新下载），那是我引入的回归，会让所有 WebDAV 下载失败。现在只在真正续传时才发。
+这两条都是只有真实服务器才会暴露的东西 —— 我第一版实现在 S3 兼容服务器上全绿，接上 Apache 才炸。顺带说明另一件事：我最初还在**每次**下载都发 `If-Match`（包括没有分片要保护的全新下载），那是我引入的回归，会让所有 WebDAV 下载失败。现在只在真正续传时才发。
 
 WebDAV 那条集成测试因此**断言不变量而不是路径**：无论走续传（强 etag）还是重下（弱 etag），落盘文件必须是对象的精确字节。断言走哪条路会让测试依赖服务器的时序。
 
@@ -734,7 +734,7 @@ WebDAV 那条集成测试因此**断言不变量而不是路径**：无论走续
 
 都是脚本层面的，但每一个都会让「集成测试跑不起来」看起来像代码坏了：
 
-- **macOS 的 `TMPDIR` 不能拿来做 Docker bind mount。** 它解析成 `/var/folders/...`，而 Docker Desktop 默认不共享这个路径 —— mount 会静默失效，MinIO 报 `Unable to use the drive /data: drive not found`。数据目录改到仓库内的 `target/test-backends`（已被 gitignore，且必然在共享范围内）。
+- **macOS 的 `TMPDIR` 不能拿来做 Docker bind mount。** 它解析成 `/var/folders/...`，而 Docker Desktop 默认不共享这个路径 —— mount 会静默失效，存储服务无法打开 `/data`。数据目录改到仓库内的 `target/test-backends`（已被 gitignore，且必然在共享范围内）。
 - **只有正在运行的容器值得复用。** 原来的脚本对已存在的容器一律 `docker start`，但 `down` 会删掉数据目录，于是旧容器的 bind mount 指向一个已经不是原样的路径。现在停止的容器一律重建。
 
 ### clippy
@@ -810,7 +810,7 @@ scale 在容器里比 macOS 慢（13.3 ms / 3.12 s，对 6.08 ms / 1.16 s），�
 
 **这一轮找出三个真 bug，同一个根因**：`docker run -v` 的源路径是在 **daemon 的**文件系统里解析的，不是在执行 step 的那个文件系统里。当 step 直接跑在宿主上（本地 macOS、或 GitHub 的普通 runner）两者恰好相同，问题完全不可见；一旦 step 跑在容器里（嵌套 runner、self-hosted 的容器化 runner），bind mount 就会静默地交付一个**空目录**。用一个最小实验单独确认过：在挂了宿主 `docker.sock` 的容器里写一个文件，再把该路径挂进另一个容器 —— 内层看得见，挂进去是空的。
 
-- **MinIO 的 bucket 不存在** —— 原来靠「在数据目录里 mkdir 一个同名目录」来建桶。改成走 S3 API（`PUT /bucket`）。顺带这也去掉了对「目录 = bucket」这个 MinIO 后端布局实现细节的依赖。
+- **S3 测试 bucket 不存在** —— 原来靠「在数据目录里 mkdir 一个同名目录」来建桶。改成走 S3 API（`PUT /bucket`）。顺带这也去掉了对「目录 = bucket」这个后端布局实现细节的依赖。
 - **fake-gcs 的 bucket 不存在** —— 同上，改成走 JSON API。
 
 还修掉一个**假信号**：原来 versioning 的 PUT 在 bucket 并不存在时也打印 `versioning enabled (200)`，脚本看上去成功、然后 18 个测试全挂在 `NoSuchBucket` 上，错误指向测试而不是脚本。现在建桶是显式的一步，失败就非零退出并打出响应体。
@@ -930,7 +930,7 @@ not implemented: Test Windows are not backed by a real platform window
 
 ### 尚未验证的部分
 
-**四个后端都已对本地兼容服务验证**（MinIO / Azurite / fake-gcs-server / WebDAV），见上文。仍然没有覆盖的是：
+**四个后端都已对本地兼容服务验证**（RustFS / Azurite / fake-gcs-server / WebDAV），见上文。仍然没有覆盖的是：
 
 - **真实的云服务本身。** 兼容实现不等同：真实 AWS 有 SigV4 区域细节、更严格的限流和最终一致性；真实 GCS/Azure 也各有自己的行为。这些只能用真账号验证。
 - **GCS 的大对象路径**（fake-gcs-server 缺 XML multipart 端点，见上）。

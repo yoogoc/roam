@@ -9,16 +9,7 @@
 //! green on a machine with no server. To run them:
 //!
 //! ```text
-//! docker run -d --name roam-minio -p 19000:9000 \
-//!   -e MINIO_ROOT_USER=roamtest -e MINIO_ROOT_PASSWORD=roamtest-secret \
-//!   -v /some/dir:/data minio/minio server /data
-//! mkdir /some/dir/roam-test          # MinIO turns a directory into a bucket
-//!
-//! ROAM_S3_ENDPOINT=http://127.0.0.1:19000 \
-//! ROAM_S3_BUCKET=roam-test \
-//! ROAM_S3_KEY=roamtest \
-//! ROAM_S3_SECRET=roamtest-secret \
-//! cargo test -p roam-core --test s3 -- --test-threads=1
+//! scripts/test-backends.sh test s3
 //! ```
 
 use std::sync::Arc;
@@ -51,14 +42,14 @@ fn session(prefix: &str) -> Option<Vfs> {
 
     let mut profile = Profile::new(
         "s3-test",
-        "MinIO",
+        "RustFS",
         format!("s3://{}/{prefix}", server.bucket),
     );
     profile
         .options
         .insert("endpoint".into(), server.endpoint.clone());
     profile.options.insert("region".into(), "us-east-1".into());
-    // MinIO serves path-style addressing, which is also what most
+    // RustFS serves path-style addressing, which is also what most
     // S3-compatible servers do.
     profile
         .options
@@ -111,15 +102,16 @@ async fn writes_and_reads_back_over_http() {
     let progress = Arc::new(TaskProgress::default());
     let source = tempfile::tempdir().unwrap();
     let file = source.path().join("hello.txt");
-    std::fs::write(&file, b"hello from minio").unwrap();
+    let payload = b"hello from rustfs";
+    std::fs::write(&file, payload).unwrap();
 
     vfs.upload_from(file, "hello.txt", progress.clone())
         .await
         .unwrap();
 
     let bytes = vfs.read_prefix("hello.txt", 4096).await.unwrap();
-    assert_eq!(bytes, b"hello from minio");
-    assert_eq!(progress.done(), 16);
+    assert_eq!(bytes, payload);
+    assert_eq!(progress.done(), payload.len() as u64);
 }
 
 #[tokio::test]
@@ -219,8 +211,8 @@ async fn listing_pages_through_more_than_one_response() {
     let vfs = s3!("paging/");
     let engine = TransferEngine::new(Rt::from_current().unwrap(), 16);
 
-    // MinIO caps a listing response at 1000 keys, so this needs two round trips
-    // and exercises the continuation token.
+    // The S3 API caps a listing response at 1000 keys, so this needs two round
+    // trips and exercises the continuation token.
     let count = 1005;
     let source = tempfile::tempdir().unwrap();
     let file = source.path().join("tiny");
@@ -278,7 +270,7 @@ async fn server_side_copy_does_not_move_bytes_through_us() {
 /// On a **versioned** bucket this asserts something subtler than "the folder is
 /// gone": every object under the prefix gets a delete marker, so no live content
 /// remains — but `ListObjectsV2` still returns the prefix itself as a common
-/// prefix, so the directory row survives. Verified against MinIO by listing the
+/// prefix, so the directory row survives. Verified against RustFS by listing the
 /// raw XML. The UI therefore explains the outcome instead of pretending the row
 /// vanished, which would mean lying about the backend's state.
 #[tokio::test]
@@ -367,7 +359,7 @@ async fn renaming_is_refused_before_a_request_is_made() {
 
     // `capability.rename` is false for S3, so the guard fires locally.
     let err = vfs.rename("a.txt", "b.txt").await.unwrap_err();
-    assert_eq!(err.user_message(), "MinIO 不支持重命名");
+    assert_eq!(err.user_message(), "RustFS 不支持重命名");
 }
 
 #[tokio::test]
@@ -780,14 +772,14 @@ async fn a_profile_built_the_way_the_form_builds_it_connects() {
         ("region", "us-east-1".to_string()),
         ("access_key_id", server.key.clone()),
         ("secret_access_key", server.secret.clone()),
-        // MinIO is path-style, which is this toggle's off value.
+        // RustFS is path-style, which is this toggle's off value.
         ("enable_virtual_host_style", "false".to_string()),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))
     .collect();
 
-    let profile = service::build_profile("form".into(), "MinIO".into(), "s3", &values).unwrap();
+    let profile = service::build_profile("form".into(), "RustFS".into(), "s3", &values).unwrap();
 
     // The URI was composed, not typed.
     assert_eq!(

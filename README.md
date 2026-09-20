@@ -34,7 +34,7 @@ server can stay open side by side while Roam transfers data between them.
 | Backend | Connection notes |
 | --- | --- |
 | **Local disk** | Browse any directory available to the current user. |
-| **Amazon S3 and compatible services** | Supports custom endpoints, path or virtual-host addressing, IAM/environment credentials, MinIO, and other S3-compatible providers. |
+| **Amazon S3 and compatible services** | Supports custom endpoints, path or virtual-host addressing, IAM/environment credentials, RustFS, and other S3-compatible providers. |
 | **Google Cloud Storage** | OAuth token or default credentials, with optional custom endpoint support. |
 | **Azure Blob Storage** | Account key, SAS/AAD fallback, and optional Azurite-compatible endpoint. |
 | **WebDAV** | HTTPS endpoint with optional username, password, and remote path. |

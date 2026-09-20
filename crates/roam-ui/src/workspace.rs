@@ -1745,7 +1745,7 @@ pub(crate) mod tests {
     fn editing_shows_the_stored_values_including_the_credential(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
-        let mut profile = Profile::new("p", "MinIO", "s3://bucket/data");
+        let mut profile = Profile::new("p", "RustFS", "s3://bucket/data");
         profile.options.insert("region".into(), "us-east-1".into());
         profile
             .options
@@ -2055,7 +2055,7 @@ mod s3_tests {
         let endpoint = std::env::var("ROAM_S3_ENDPOINT").ok()?;
         let bucket = std::env::var("ROAM_S3_BUCKET").unwrap_or_else(|_| "roam-test".into());
 
-        let mut profile = Profile::new("minio", "MinIO", format!("s3://{bucket}/ui-test/"));
+        let mut profile = Profile::new("rustfs", "RustFS", format!("s3://{bucket}/ui-test/"));
         profile.options.insert("endpoint".into(), endpoint);
         profile.options.insert("region".into(), "us-east-1".into());
         profile
@@ -2082,9 +2082,9 @@ mod s3_tests {
         let mut h = Harness::new(cx);
         // The credentials ride in the profile itself now.
         h.add_profile(profile);
-        h.connect("minio");
+        h.connect("rustfs");
 
-        assert_eq!(h.active().as_deref(), Some("minio"));
+        assert_eq!(h.active().as_deref(), Some("rustfs"));
         // Listing succeeded, so no error banner. The prefix may be empty on a
         // fresh server; what matters is that the request went through.
         assert!(h.error_message().is_none(), "got {:?}", h.error_message());
@@ -2112,7 +2112,7 @@ mod s3_tests {
 
         let mut h = Harness::new(cx);
         h.add_profile(profile);
-        h.connect("minio");
+        h.connect("rustfs");
 
         // The session still switches — the credentials are only rejected once a
         // request is made — but the pane must surface the failure rather than
