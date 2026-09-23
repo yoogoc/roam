@@ -23,6 +23,10 @@ enum State {
         body: SharedString,
         truncated: bool,
     },
+    Tree {
+        body: SharedString,
+        truncated: bool,
+    },
     Image(Arc<Image>),
     /// Why there is nothing to show.
     Unavailable(SharedString),
@@ -75,8 +79,31 @@ impl PreviewPanel {
         };
 
         if entry.is_dir() {
-            self.state = State::Unavailable("目录没有预览".into());
+            self.state = State::Loading;
             cx.notify();
+
+            let vfs = self.vfs.clone();
+            let path = entry.path.to_string();
+            let name = entry.name.to_string();
+            self.task = Some(cx.spawn(async move |this, cx| {
+                let listing = vfs
+                    .list_recursive_limited(&path, preview::TREE_ENTRY_LIMIT)
+                    .await;
+
+                let _ = this.update(cx, |this, cx| {
+                    if generation != this.generation {
+                        return;
+                    }
+
+                    this.state = match listing {
+                        Ok((entries, truncated)) => {
+                            tree_state(preview::directory_tree(&name, &path, entries, truncated))
+                        }
+                        Err(err) => State::Unavailable(err.full_message().into()),
+                    };
+                    cx.notify();
+                });
+            }));
             return;
         }
 
@@ -92,6 +119,7 @@ impl PreviewPanel {
 
         let vfs = self.vfs.clone();
         let path = entry.path.to_string();
+        let name = entry.name.to_string();
         let limit = preview::read_limit(&kind);
 
         self.task = Some(cx.spawn(async move |this, cx| {
@@ -103,7 +131,7 @@ impl PreviewPanel {
                 }
 
                 this.state = match bytes {
-                    Ok(bytes) => render_state(&kind, bytes, limit),
+                    Ok(bytes) => render_state(&kind, &name, bytes, limit),
                     Err(err) => State::Unavailable(err.full_message().into()),
                 };
                 cx.notify();
@@ -122,6 +150,7 @@ impl PreviewPanel {
             State::Loading => "loading",
             State::Text { .. } => "text",
             State::Markdown { .. } => "markdown",
+            State::Tree { .. } => "tree",
             State::Image(_) => "image",
             State::Unavailable(_) => "unavailable",
         }
@@ -130,7 +159,9 @@ impl PreviewPanel {
     #[cfg(test)]
     pub(crate) fn body_text(&self) -> Option<String> {
         match &self.state {
-            State::Text { body, .. } | State::Markdown { body, .. } => Some(body.to_string()),
+            State::Text { body, .. } | State::Markdown { body, .. } | State::Tree { body, .. } => {
+                Some(body.to_string())
+            }
             State::Unavailable(reason) => Some(reason.to_string()),
             _ => None,
         }
@@ -144,6 +175,9 @@ impl PreviewPanel {
                 truncated: true,
                 ..
             } | State::Markdown {
+                truncated: true,
+                ..
+            } | State::Tree {
                 truncated: true,
                 ..
             }
@@ -208,7 +242,7 @@ impl PreviewPanel {
                         .overflow_y_scrollbar()
                         .child(body.clone()),
                 )
-                .when(*truncated, |el| el.child(truncation_note(cx)))
+                .when(*truncated, |el| el.child(text_truncation_note(cx)))
                 .into_any_element(),
 
             State::Markdown { body, truncated } => v_flex()
@@ -222,7 +256,23 @@ impl PreviewPanel {
                         .overflow_y_scrollbar()
                         .child(TextView::markdown("preview-md", body.clone())),
                 )
-                .when(*truncated, |el| el.child(truncation_note(cx)))
+                .when(*truncated, |el| el.child(text_truncation_note(cx)))
+                .into_any_element(),
+
+            State::Tree { body, truncated } => v_flex()
+                .size_full()
+                .min_h_0()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .p_3()
+                        .font_family("ui-monospace")
+                        .text_xs()
+                        .overflow_y_scrollbar()
+                        .child(body.clone()),
+                )
+                .when(*truncated, |el| el.child(tree_truncation_note(cx)))
                 .into_any_element(),
 
             State::Image(image) => div()
@@ -237,7 +287,10 @@ impl PreviewPanel {
     }
 }
 
-fn truncation_note(cx: &mut gpui_kit::Context<PreviewPanel>) -> impl IntoElement {
+fn truncation_note(
+    text: SharedString,
+    cx: &mut gpui_kit::Context<PreviewPanel>,
+) -> impl IntoElement {
     // Saying so matters: a preview that silently stops mid-file looks like a
     // truncated file.
     h_flex()
@@ -250,14 +303,25 @@ fn truncation_note(cx: &mut gpui_kit::Context<PreviewPanel>) -> impl IntoElement
         .border_color(cx.theme().border)
         .text_color(cx.theme().muted_foreground)
         .child(Icon::new(IconName::Info).size_3())
-        .child(SharedString::from(format!(
-            "只显示前 {}",
-            fmt::size(Some(preview::TEXT_LIMIT))
-        )))
+        .child(text)
+}
+
+fn text_truncation_note(cx: &mut gpui_kit::Context<PreviewPanel>) -> impl IntoElement {
+    truncation_note(
+        SharedString::from(format!("只显示前 {}", fmt::size(Some(preview::TEXT_LIMIT)))),
+        cx,
+    )
+}
+
+fn tree_truncation_note(cx: &mut gpui_kit::Context<PreviewPanel>) -> impl IntoElement {
+    truncation_note(
+        SharedString::from(format!("只显示前 {} 项", preview::TREE_ENTRY_LIMIT)),
+        cx,
+    )
 }
 
 /// Turn fetched bytes into a renderable state.
-fn render_state(kind: &PreviewKind, bytes: Vec<u8>, limit: u64) -> State {
+fn render_state(kind: &PreviewKind, name: &str, bytes: Vec<u8>, limit: u64) -> State {
     // A ranged read returning exactly the limit means there is very likely more.
     let truncated = bytes.len() as u64 >= limit;
 
@@ -282,7 +346,19 @@ fn render_state(kind: &PreviewKind, bytes: Vec<u8>, limit: u64) -> State {
             }
         }
 
+        PreviewKind::Zip => match preview::zip_tree(name, &bytes) {
+            Ok(tree) => tree_state(tree),
+            Err(error) => State::Unavailable(error.into()),
+        },
+
         PreviewKind::None(reason) => State::Unavailable((*reason).into()),
+    }
+}
+
+fn tree_state(tree: preview::TreePreview) -> State {
+    State::Tree {
+        body: tree.body.into(),
+        truncated: tree.truncated,
     }
 }
 

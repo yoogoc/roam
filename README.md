@@ -25,7 +25,7 @@ server can stay open side by side while Roam transfers data between them.
 | **Browse at scale** | Virtualized tables, streamed listings, filtering, sorting, hidden-file controls, and a lazily loaded directory tree. |
 | **Work across storage** | Multiple independent tabs and cross-backend copy, upload, download, move, progress, cancellation, and resumable downloads. |
 | **Use familiar file tools** | Create folders, rename, duplicate, delete with confirmation, drag files in from Finder, and inspect capability-aware context menus. |
-| **Preview without downloading** | Built-in previews for text, Markdown, and images, with bounded reads for remote files. |
+| **Preview before opening** | Built-in previews for text, Markdown, images, directory trees, and ZIP contents, with bounded reads for remote storage. |
 | **Stay in control** | Light and dark themes, collapsible sidebar sections, editable keyboard shortcuts, and confirmation before closing a tab or quitting. |
 | **Inspect object history** | Browse, preview, download, and restore object versions when the backend exposes versioning. |
 

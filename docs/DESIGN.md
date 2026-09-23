@@ -305,7 +305,7 @@ Root (TitleBar)
     ├── Center  Workspace
     │             ├── Toolbar: 后退/前进/上级/刷新 + Breadcrumb + 过滤框 + 视图切换
     │             └── Tabs → PaneView (虚拟化 Table: 名称 / 大小 / 修改时间 / 类型)
-    ├── Right   详情 + 预览（文本 / 图片 / Markdown）
+    ├── Right   详情 + 预览（文本 / 图片 / Markdown / 目录树 / ZIP 目录树）
     └── Bottom  TransferPanel (任务列表 + 进度) · StatusBar
 ```
 

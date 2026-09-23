@@ -19,3 +19,4 @@ tempfile = "3"
 # The same rasteriser gpui renders svgs with (it keeps its `SvgRenderer` private),
 # so the icon test exercises the real parse-and-draw path rather than a stand-in.
 resvg = "0.46"
+zip.workspace = true

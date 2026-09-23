@@ -52,3 +52,6 @@ toml = "1.1"
 directories = "6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Previewing an archive only reads its central directory, so no compression
+# codecs are needed.
+zip = { version = "8.4", default-features = false }

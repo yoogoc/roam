@@ -2251,6 +2251,7 @@ mod keyboard_tests {
 mod preview_tests {
     use super::tests::*;
     use gpui_kit::TestAppContext;
+    use std::io::{Cursor, Write};
 
     #[gpui_kit::test]
     fn the_panel_starts_empty(cx: &mut TestAppContext) {
@@ -2281,27 +2282,42 @@ mod preview_tests {
     }
 
     #[gpui_kit::test]
-    fn a_directory_says_it_has_no_preview(cx: &mut TestAppContext) {
+    fn a_directory_shows_its_tree(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
 
         h.select_row("documents");
         h.settle_preview();
 
-        assert_eq!(h.preview_state(), "unavailable");
-        assert_eq!(h.preview_body().unwrap(), "目录没有预览");
+        assert_eq!(h.preview_state(), "tree");
+        assert_eq!(
+            h.preview_body().unwrap(),
+            "documents/\n├── reports/\n│   └── q1.xlsx\n└── contract.pdf\n"
+        );
     }
 
     #[gpui_kit::test]
-    fn a_binary_file_is_refused_by_extension(cx: &mut TestAppContext) {
+    fn a_zip_shows_its_tree(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
-        h.write_file("archive.zip", b"PK\x03\x04not really");
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        writer.add_directory("docs/", options).unwrap();
+        writer.start_file("docs/readme.txt", options).unwrap();
+        writer.write_all(b"hello").unwrap();
+        writer.start_file("root.txt", options).unwrap();
+        writer.write_all(b"root").unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+        h.write_file("archive.zip", &bytes);
         h.reload_now();
 
         h.select_row("archive.zip");
         h.settle_preview();
 
-        assert_eq!(h.preview_state(), "unavailable");
-        assert_eq!(h.preview_body().unwrap(), "二进制文件，暂不预览");
+        assert_eq!(h.preview_state(), "tree");
+        assert_eq!(
+            h.preview_body().unwrap(),
+            "archive.zip/\n├── docs/\n│   └── readme.txt\n└── root.txt\n"
+        );
     }
 
     #[gpui_kit::test]

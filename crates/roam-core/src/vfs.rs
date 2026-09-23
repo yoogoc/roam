@@ -725,6 +725,38 @@ impl Vfs {
         })
     }
 
+    /// At most `limit` entries beneath `dir`, plus whether more existed.
+    ///
+    /// Directory preview uses this instead of [`Self::list_recursive`]: opening
+    /// the preview panel must not collect a 100k-entry bucket into memory just
+    /// to render a small tree.
+    pub fn list_recursive_limited(
+        &self,
+        dir: &str,
+        limit: usize,
+    ) -> impl Future<Output = Result<(Vec<DirEntry>, bool)>> + Send + 'static {
+        let op = self.inner.op.clone();
+        let dir = path::as_dir(dir);
+
+        self.inner.rt.spawn(async move {
+            let mut lister = op.lister_with(&dir).recursive(true).await?;
+            let mut out = Vec::with_capacity(limit.min(1024));
+
+            while let Some(entry) = lister.next().await {
+                let entry = entry?;
+                if path::as_dir(entry.path()) == dir || path::basename(entry.path()).is_empty() {
+                    continue;
+                }
+                if out.len() == limit {
+                    return Ok((out, true));
+                }
+                out.push(DirEntry::from_entry(&entry));
+            }
+
+            Ok((out, false))
+        })
+    }
+
     /// Read at most `limit` bytes from the start of an object.
     ///
     /// Used by the preview panel, so a preview never pulls a whole
@@ -1135,6 +1167,19 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(&*entries[0].name, "c.txt");
         assert_eq!(&*entries[0].path, "sub/c.txt");
+    }
+
+    #[tokio::test]
+    async fn a_limited_recursive_listing_reports_that_more_entries_exist() {
+        let (_guard, vfs) = fixture();
+
+        let (limited, truncated) = vfs.list_recursive_limited("", 2).await.unwrap();
+        assert_eq!(limited.len(), 2);
+        assert!(truncated);
+
+        let (complete, truncated) = vfs.list_recursive_limited("", 10).await.unwrap();
+        assert_eq!(complete.len(), 4, "three files plus the subdirectory");
+        assert!(!truncated);
     }
 
     #[tokio::test]
