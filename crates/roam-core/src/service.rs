@@ -234,7 +234,67 @@ const WEBDAV: Service = Service {
 };
 
 /// Every supported backend, in the order the picker shows them on all platforms.
-pub static SERVICES: &[Service] = &[FS, S3, GCS, AZBLOB, WEBDAV, NFS];
+pub static SERVICES: &[Service] = &[FS, S3, GCS, AZBLOB, WEBDAV, NFS, SHAREPOINT];
+
+const SHAREPOINT: Service = Service {
+    scheme: "sharepoint",
+    label: "SharePoint Online",
+    fields: &[
+        Field::text(
+            "drive_id",
+            "文档库 Drive ID",
+            "Microsoft Graph 中的文档库 ID，例如 b!...",
+        )
+        .required(),
+        Field::text(
+            "prefix",
+            "目录",
+            "可选，文档库内的子目录，例如 team/reports",
+        )
+        .prefix(),
+        Field::text("auth_method", "认证方式", "选择一种认证方式"),
+        Field::text(
+            "tenant_id",
+            "Tenant ID",
+            "Entra 租户 ID 或租户域名；应用身份认证必填",
+        ),
+        Field::text(
+            "access_token",
+            "访问令牌",
+            "Microsoft Graph token；与刷新令牌二选一",
+        )
+        .secret(),
+        Field::text(
+            "refresh_token",
+            "刷新令牌",
+            "用于自动续期；需要同时填写 Client ID",
+        )
+        .secret(),
+        Field::text(
+            "client_id",
+            "Client ID",
+            "Entra 应用注册中的 Application (client) ID",
+        ),
+        Field::text(
+            "client_secret",
+            "Client Secret",
+            "应用的客户端密钥值；不是密钥 ID",
+        )
+        .secret(),
+        Field::text(
+            "certificate_path",
+            "PFX 证书",
+            "本机 .pfx 或 .p12 文件的完整路径",
+        )
+        .path(),
+        Field::text(
+            "certificate_password",
+            "证书密码",
+            "PFX 文件密码；无密码时留空",
+        )
+        .secret(),
+    ],
+};
 
 const NFS: Service = Service {
     scheme: "nfs",
@@ -277,7 +337,16 @@ pub fn build_profile(
     let mut prefix = String::new();
 
     for field in service.fields {
-        let value = values.get(field.key).map(|v| v.trim()).unwrap_or("");
+        let value = values
+            .get(field.key)
+            .map(|v| {
+                if field.key == "certificate_password" {
+                    v.as_str()
+                } else {
+                    v.trim()
+                }
+            })
+            .unwrap_or("");
 
         if field.required && value.is_empty() {
             return Err(Error::Config(format!("请填写{}", field.label)));

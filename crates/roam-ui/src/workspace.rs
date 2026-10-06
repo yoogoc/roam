@@ -531,22 +531,47 @@ impl Workspace {
         window.open_dialog(cx, move |dialog, window, _cx| {
             let form = form.clone();
             let this = this.clone();
+            let closed = this.clone();
+            let form_id = form.entity_id();
+            let busy = form.read(_cx).is_saving();
 
             let ceiling = dialog_max_height(window.viewport_size().height);
 
             dialog
                 .title(title.clone())
                 .w(px(800.).min(window.viewport_size().width - px(48.)))
-                // The one line that makes the form scrollable at all — see
-                // `dialog_max_height`.
+                // Give the form definite bounds; its columns own their
+                // scrolling instead of measuring the whole form on every frame.
+                .h(ceiling)
                 .max_h(ceiling)
-                .child(form.clone())
+                .content(move |content, _, _| content.min_h_0().child(form.clone()))
                 // False keeps the dialog open: the form has already said what
                 // was wrong, and the input is still in it.
-                .confirm_cancel("保存并连接", "取消", move |window, cx| {
-                    this.update(cx, |workspace, cx| workspace.save_form(window, cx))
-                        .unwrap_or(false)
-                })
+                .confirm_cancel_busy(
+                    if busy {
+                        "正在保存…"
+                    } else {
+                        "保存并连接"
+                    },
+                    "取消",
+                    busy,
+                    move |window, cx| {
+                        this.update(cx, |workspace, cx| workspace.save_form(window, cx))
+                            .unwrap_or(false)
+                    },
+                    move |_, cx| {
+                        let _ = closed.update(cx, |workspace, cx| {
+                            if workspace
+                                .form
+                                .as_ref()
+                                .is_some_and(|f| f.entity_id() == form_id)
+                            {
+                                workspace.form = None;
+                                cx.notify();
+                            }
+                        });
+                    },
+                )
         });
     }
 
@@ -555,6 +580,9 @@ impl Workspace {
         let Some(form) = self.form.clone() else {
             return true;
         };
+        if form.read(cx).is_saving() {
+            return false;
+        }
 
         let taken = self.taken_ids();
         let profile = match form.read(cx).build(&taken, cx) {
@@ -570,6 +598,47 @@ impl Workspace {
         match profiles.iter_mut().find(|p| p.id == profile.id) {
             Some(slot) => *slot = profile.clone(),
             None => profiles.push(profile.clone()),
+        }
+
+        if profile.scheme() == "sharepoint"
+            && roam_core::SharePointAuthMethod::from_profile(&profile)
+                .is_ok_and(|method| method == roam_core::SharePointAuthMethod::Certificate)
+        {
+            let store = self.store.clone();
+            let bytes = form.read(cx).certificate_bytes();
+            form.update(cx, |form, cx| form.set_saving(true, cx));
+            let handle = window.window_handle();
+            let id = profile.id.clone();
+            cx.spawn(async move |this, cx| {
+                let saved_id = id.clone();
+                let saved = cx
+                    .background_executor()
+                    .spawn(async move {
+                        store.save_importing_certificate(
+                            profiles,
+                            &saved_id,
+                            bytes.as_deref().map(Vec::as_slice),
+                        )
+                    })
+                    .await;
+                let _ = handle.update(cx, |_, window, cx| {
+                    let _ = this.update(cx, |workspace, cx| match saved {
+                        Ok(profiles) => {
+                            workspace.profiles = profiles;
+                            workspace.form = None;
+                            window.close_dialog(cx);
+                            window.push_notification("连接及证书已保存", cx);
+                            workspace.connect(id, window, cx);
+                        }
+                        Err(error) => {
+                            form.update(cx, |form, cx| form.set_saving(false, cx));
+                            window.push_notification(error.full_message(), cx);
+                        }
+                    });
+                });
+            })
+            .detach();
+            return false;
         }
 
         if let Err(err) = self.store.save(&profiles) {
@@ -603,8 +672,7 @@ impl Workspace {
             return;
         }
 
-        // Nothing to clean up outside this file any more: the credentials went
-        // out with the profile when it was dropped from `remaining`.
+        // ProfileStore also removes managed certificates no longer referenced.
         self.profiles = remaining;
         // Any tab still pointing at the deleted profile falls back to local.
         if self
@@ -1057,6 +1125,16 @@ impl Render for Workspace {
             Some(profile) => format!("{} · {}", profile.name, profile.uri),
             None => format!("本机 · {}", self.active_browser().read(cx).label()),
         };
+        // Cache the inactive pane while a modal is open. Keep the normal view
+        // outside dialogs so its accessibility tree is rebuilt on every frame.
+        let browser = if window.has_active_dialog(cx) {
+            self.active_browser()
+                .clone()
+                .cached(gpui_kit::StyleRefinement::default().size_full())
+                .into_any_element()
+        } else {
+            self.active_browser().clone().into_any_element()
+        };
 
         v_flex()
             .relative()
@@ -1112,12 +1190,7 @@ impl Render for Workspace {
                                     }),
                             )
                             .child(self.render_capability_bar(cx))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_h_0()
-                                    .child(self.active_browser().clone()),
-                            )
+                            .child(div().flex_1().min_h_0().child(browser))
                             .child(self.transfers.clone()),
                     ),
             )
@@ -1129,12 +1202,8 @@ impl Render for Workspace {
 
 /// How tall the connection dialog may get, given the window's height.
 ///
-/// The dialog has to be the thing that is bounded. gpui-component wraps a
-/// dialog's children in a scroll area already, but that area only ever
-/// overflows — and so only ever grows a scrollbar — if the popup around it has
-/// a ceiling; left alone the popup simply gets taller than the window, taking
-/// the buttons with it. The form itself must not carry the cap instead: see the
-/// comment in `ConnectionForm::render` for why capping a scrollable clips it.
+/// A bounded popup lets its body scroll without pushing the footer off screen.
+/// Connection forms use this as their height; other dialogs use it as a ceiling.
 ///
 /// The popup is anchored a tenth of the way down the window, so 0.8 leaves the
 /// same margin underneath it.
@@ -1643,6 +1712,198 @@ pub(crate) mod tests {
                 form.set_field("nfs_port", "70000", window, cx);
                 assert!(form.build(&[], cx).is_err());
             });
+        });
+    }
+
+    #[gpui_kit::test]
+    fn sharepoint_form_validates_and_preserves_credentials_when_editing(cx: &mut TestAppContext) {
+        let mut h = Harness::new(cx);
+        h.cx.update(|window, cx| {
+            let form = cx.new(|cx| ConnectionForm::new(window, cx));
+            let profile = form.update(cx, |form, cx| {
+                form.choose_scheme("sharepoint", window, cx);
+                form.choose_sharepoint_auth(
+                    roam_core::SharePointAuthMethod::RefreshToken,
+                    window,
+                    cx,
+                );
+                form.set_name("Team Documents", window, cx);
+                form.set_field("drive_id", "b!library", window, cx);
+                assert!(form.build(&[], cx).is_err(), "a token is required");
+                form.set_field("prefix", "Team Reports", window, cx);
+                form.set_field("refresh_token", "refresh-token", window, cx);
+                assert!(form.build(&[], cx).is_err(), "refresh requires a client ID");
+                form.set_field("client_id", "app-id", window, cx);
+                form.build(&[], cx).unwrap()
+            });
+            assert_eq!(profile.uri, "sharepoint:///Team Reports");
+            let edited = cx.new(|cx| ConnectionForm::editing(&profile, window, cx));
+            assert_eq!(edited.read(cx).build(&[], cx).unwrap(), profile);
+            edited.update(cx, |form, cx| {
+                form.set_field("access_token", "access-token", window, cx);
+                form.choose_sharepoint_auth(
+                    roam_core::SharePointAuthMethod::AccessToken,
+                    window,
+                    cx,
+                );
+                let profile = form.build(&[], cx).unwrap();
+                assert_eq!(profile.options["access_token"], "access-token");
+                assert!(!profile.options.contains_key("refresh_token"));
+                assert!(!profile.options.contains_key("client_id"));
+            });
+        });
+    }
+
+    #[gpui_kit::test]
+    fn sharepoint_application_auth_saves_only_selected_credentials_and_preserves_pfx_password(
+        cx: &mut TestAppContext,
+    ) {
+        use roam_core::SharePointAuthMethod;
+        let mut h = Harness::new(cx);
+        h.cx.update(|window, cx| {
+            let form = cx.new(|cx| ConnectionForm::new(window, cx));
+            let certificate = form.update(cx, |form, cx| {
+                form.choose_scheme("sharepoint", window, cx);
+                form.set_name("Application library", window, cx);
+                form.set_field("drive_id", "b!library", window, cx);
+                form.set_field("tenant_id", "contoso.onmicrosoft.com", window, cx);
+                form.set_field("client_id", "app-id", window, cx);
+                assert!(form.build(&[], cx).is_err());
+                form.set_field("client_secret", "client-secret", window, cx);
+                let secret = form.build(&[], cx).unwrap();
+                assert_eq!(secret.options["auth_method"], "client_secret");
+                assert!(!secret.options.contains_key("access_token"));
+                form.choose_sharepoint_auth(SharePointAuthMethod::Certificate, window, cx);
+                assert!(form.build(&[], cx).is_err(), "PFX path is required");
+                form.set_field("certificate_path", "/tmp/identity.pfx", window, cx);
+                form.set_field("certificate_password", " password with spaces ", window, cx);
+                let certificate = form.build(&[], cx).unwrap();
+                assert_eq!(certificate.options["auth_method"], "certificate");
+                assert_eq!(
+                    certificate.options["certificate_password"],
+                    " password with spaces "
+                );
+                assert!(!certificate.options.contains_key("client_secret"));
+                form.choose_sharepoint_auth(SharePointAuthMethod::ClientSecret, window, cx);
+                assert_eq!(
+                    form.build(&[], cx).unwrap(),
+                    secret,
+                    "switching modes retains input values"
+                );
+                certificate
+            });
+            let edited = cx.new(|cx| ConnectionForm::editing(&certificate, window, cx));
+            assert_eq!(edited.read(cx).build(&[], cx).unwrap(), certificate);
+            let mut legacy = roam_core::Profile::new("legacy", "Legacy", "sharepoint:///");
+            legacy.options.insert("drive_id".into(), "b!library".into());
+            legacy.options.insert("access_token".into(), "token".into());
+            let edited = cx.new(|cx| ConnectionForm::editing(&legacy, window, cx));
+            assert_eq!(edited.read(cx).build(&[], cx).unwrap(), legacy);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn dropping_pfx_stages_bytes_switches_auth_and_cancel_discards_the_import(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui_kit::{ExternalPaths, FileDropEvent, point, size};
+        let mut h = Harness::new(cx);
+        let source = h._local_dir.path().join("identity.pfx");
+        std::fs::write(
+            &source,
+            include_bytes!("../../roam-core/tests/fixtures/sharepoint-test.pfx"),
+        )
+        .unwrap();
+        h.cx.simulate_resize(size(px(900.), px(640.)));
+        let workspace = h.workspace.clone();
+        h.cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.open_new_connection_for("sharepoint", window, cx)
+            });
+        });
+        h.cx.refresh().unwrap();
+        h.cx.run_until_parked();
+        let position = point(px(650.), px(300.));
+        h.cx.simulate_event(FileDropEvent::Entered {
+            position,
+            paths: ExternalPaths([source.clone()].into_iter().collect()),
+        });
+        h.cx.simulate_event(FileDropEvent::Submit { position });
+        h.cx.simulate_event(FileDropEvent::Ended);
+        h.cx.run_until_parked();
+        let form = h.workspace.read_with(&h.cx, |w, _| w.form.clone().unwrap());
+        let bytes = form
+            .read_with(&h.cx, |f, _| f.certificate_bytes())
+            .expect("the actual platform drop reached the form");
+        assert_eq!(
+            bytes.as_slice(),
+            include_bytes!("../../roam-core/tests/fixtures/sharepoint-test.pfx")
+        );
+        std::fs::remove_file(&source).unwrap();
+        h.cx.update(|window, cx| {
+            form.update(cx, |f, cx| {
+                f.set_name("SharePoint", window, cx);
+                f.set_field("drive_id", "b!library", window, cx);
+                f.set_field("tenant_id", "tenant-id", window, cx);
+                f.set_field("client_id", "app-id", window, cx);
+                f.set_field("certificate_password", " pfx+test password ", window, cx);
+                let profile = f.build(&[], cx).unwrap();
+                assert_eq!(profile.options["auth_method"], "certificate");
+                assert_eq!(profile.options["certificate_name"], "identity.pfx");
+            })
+        });
+        assert!(!h.config_path.exists());
+        assert!(!h._config_dir.path().join("certificates").exists());
+        h.cx.simulate_keystrokes("escape");
+        assert!(h.workspace.read_with(&h.cx, |w, _| w.form.is_none()));
+        assert!(!h._config_dir.path().join("certificates").exists());
+    }
+
+    #[gpui_kit::test]
+    fn an_invalid_pfx_password_keeps_the_form_and_does_not_save(cx: &mut TestAppContext) {
+        let mut h = Harness::new(cx);
+        let source = h._local_dir.path().join("identity.pfx");
+        std::fs::write(
+            &source,
+            include_bytes!("../../roam-core/tests/fixtures/sharepoint-test.pfx"),
+        )
+        .unwrap();
+        let workspace = h.workspace.clone();
+        h.cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.open_new_connection_for("sharepoint", window, cx);
+                w.form.clone().unwrap().update(cx, |f, cx| {
+                    f.set_name("SharePoint", window, cx);
+                    f.set_field("drive_id", "b!library", window, cx);
+                    f.set_field("tenant_id", "tenant-id", window, cx);
+                    f.set_field("client_id", "app-id", window, cx);
+                    f.set_field("certificate_password", "wrong-password", window, cx);
+                    f.drop_certificate(std::slice::from_ref(&source), window, cx);
+                });
+            })
+        });
+        h.cx.run_until_parked();
+        h.cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                assert!(!w.save_form(window, cx));
+                assert!(w.form.as_ref().unwrap().read(cx).is_saving());
+                assert!(!w.save_form(window, cx), "duplicate save is ignored");
+            })
+        });
+        h.cx.run_until_parked();
+        assert!(!h.config_path.exists());
+        h.workspace.read_with(&h.cx, |w, cx| {
+            let form = w
+                .form
+                .as_ref()
+                .expect("failed save preserves the form")
+                .read(cx);
+            assert!(!form.is_saving());
+            assert!(
+                form.certificate_bytes().is_some(),
+                "retry preserves staged bytes"
+            );
+            assert!(w.profiles.is_empty());
         });
     }
 

@@ -12,6 +12,7 @@
 //! one is not.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -93,6 +94,9 @@ impl Profile {
 
         if self.scheme() == "nfs" {
             crate::nfs::NfsConfig::from_profile(self)?;
+        }
+        if self.scheme() == "sharepoint" {
+            crate::sharepoint::validate(self)?;
         }
         Ok(())
     }
@@ -209,6 +213,37 @@ pub fn parse_kv_lines(text: &str) -> Result<BTreeMap<String, String>> {
     Ok(out)
 }
 
+/// Stage a PFX in memory, without copying it into the configuration directory.
+/// Call on a background thread; the import is committed only when saving.
+pub fn read_pfx_file(path: &Path) -> Result<Vec<u8>> {
+    if !path
+        .extension()
+        .and_then(|s| s.to_str())
+        .is_some_and(|s| s.eq_ignore_ascii_case("pfx") || s.eq_ignore_ascii_case("p12"))
+    {
+        return Err(Error::Config("请拖入一个 .pfx 或 .p12 证书文件".into()));
+    }
+    crate::sharepoint_auth::CertificateCredential::read_file(path).map_err(Into::into)
+}
+
+fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|e| Error::Config(format!("创建 {} 失败: {e}", path.display())))?;
+    if let Err(e) = file.write_all(bytes).and_then(|_| file.sync_all()) {
+        let _ = std::fs::remove_file(path);
+        return Err(Error::Config(format!("写入 {} 失败: {e}", path.display())));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct ProfilesFile {
     #[serde(default, rename = "profile")]
@@ -281,18 +316,343 @@ impl ProfileStore {
                 .map_err(|e| Error::Config(format!("创建 {} 失败: {e}", parent.display())))?;
         }
 
-        std::fs::write(&self.path, text)
-            .map_err(|e| Error::Config(format!("写入 {} 失败: {e}", self.path.display())))?;
-
-        // The file holds no secrets, but it does describe someone's
-        // infrastructure; keep it owner-only.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600));
+        // Replace atomically: a failed save must retain both the old profile and
+        // the certificate it references. The temporary file is owner-only too.
+        let old = self.load().unwrap_or_default();
+        let temporary = self
+            .path
+            .with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+        write_private_file(&temporary, text.as_bytes())?;
+        if let Err(e) = std::fs::rename(&temporary, &self.path) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(Error::Config(format!(
+                "写入 {} 失败: {e}",
+                self.path.display()
+            )));
+        }
+        for path in old.iter().filter_map(certificate_path) {
+            if self.owns_certificate(path)
+                && !profiles
+                    .iter()
+                    .filter_map(certificate_path)
+                    .any(|p| p == path)
+            {
+                let _ = std::fs::remove_file(path);
+            }
         }
 
         Ok(())
+    }
+
+    /// Import the changed connection's certificate and save profiles together.
+    /// Staged bytes let the original file disappear after dropping it. For an
+    /// older path-based connection, saving imports the file automatically.
+    /// Parsing and disk IO belong on a background thread.
+    pub fn save_importing_certificate(
+        &self,
+        mut profiles: Vec<Profile>,
+        changed_id: &str,
+        staged: Option<&[u8]>,
+    ) -> Result<Vec<Profile>> {
+        for profile in &profiles {
+            profile.validate()?;
+        }
+        let profile = profiles
+            .iter_mut()
+            .find(|p| p.id == changed_id)
+            .ok_or_else(|| Error::Config("找不到要保存的连接".into()))?;
+        if profile.scheme() != "sharepoint"
+            || crate::SharePointAuthMethod::from_profile(profile)?
+                != crate::SharePointAuthMethod::Certificate
+        {
+            return Err(Error::Config("此连接未使用 PFX 证书认证".into()));
+        }
+        let source = PathBuf::from(&profile.options["certificate_path"]);
+        let bytes = match staged {
+            Some(bytes) => bytes.to_vec(),
+            None => crate::sharepoint_auth::CertificateCredential::read_file(&source)?,
+        };
+        if bytes.len() > 1024 * 1024 {
+            return Err(Error::Config("PFX 证书文件不能超过 1 MiB".into()));
+        }
+        let credential = crate::sharepoint_auth::CertificateCredential::from_pkcs12(
+            &bytes,
+            profile
+                .options
+                .get("certificate_password")
+                .map(String::as_str)
+                .unwrap_or(""),
+        )?;
+        // Also reject an expired/not-yet-valid certificate before persisting.
+        credential.ensure_valid()?;
+
+        let mut imported = None;
+        if staged.is_some() || !self.owns_certificate(&source) {
+            let directory = self
+                .path
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join("certificates");
+            std::fs::create_dir_all(&directory)
+                .map_err(|e| Error::Config(format!("创建证书目录失败: {e}")))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+                    .map_err(|e| Error::Config(format!("设置证书目录权限失败: {e}")))?;
+            }
+            let directory = std::fs::canonicalize(directory)
+                .map_err(|e| Error::Config(format!("读取证书目录失败: {e}")))?;
+            let destination = directory.join(format!("{}.pfx", uuid::Uuid::new_v4()));
+            let stored_path = destination
+                .to_str()
+                .ok_or_else(|| Error::Config("证书存储路径不是有效 UTF-8".into()))?
+                .to_owned();
+            write_private_file(&destination, &bytes)?;
+            profile
+                .options
+                .insert("certificate_path".into(), stored_path);
+            if !profile.options.contains_key("certificate_name") {
+                profile.options.insert(
+                    "certificate_name".into(),
+                    source
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+            imported = Some(destination);
+        }
+        if let Err(error) = self.save(&profiles) {
+            if let Some(path) = imported {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(error);
+        }
+        Ok(profiles)
+    }
+
+    fn owns_certificate(&self, path: &Path) -> bool {
+        let directory = self
+            .path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("certificates");
+        let Ok(directory) = std::fs::canonicalize(directory) else {
+            return false;
+        };
+        let Some(parent) = path.parent() else {
+            return false;
+        };
+        let Ok(parent) = std::fs::canonicalize(parent) else {
+            return false;
+        };
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            return false;
+        };
+        parent == directory
+            && name.strip_suffix(".pfx").is_some_and(|name| {
+                uuid::Uuid::parse_str(name).is_ok_and(|id| id.hyphenated().to_string() == name)
+            })
+    }
+}
+
+fn certificate_path(profile: &Profile) -> Option<&Path> {
+    (profile.scheme() == "sharepoint")
+        .then(|| profile.options.get("certificate_path").map(Path::new))
+        .flatten()
+}
+
+#[cfg(test)]
+mod certificate_tests {
+    use super::*;
+    const PFX: &[u8] = include_bytes!("../tests/fixtures/sharepoint-test.pfx");
+    const PASSWORD: &str = " pfx+test password ";
+
+    fn connection(source: &Path) -> Profile {
+        let mut profile = Profile::new("sharepoint", "SharePoint", "sharepoint:///");
+        profile.options.extend([
+            ("auth_method".into(), "certificate".into()),
+            ("drive_id".into(), "b!library".into()),
+            ("tenant_id".into(), "tenant-id".into()),
+            ("client_id".into(), "app-id".into()),
+            ("certificate_path".into(), source.to_str().unwrap().into()),
+            ("certificate_password".into(), PASSWORD.into()),
+        ]);
+        profile
+    }
+
+    #[test]
+    fn imported_certificate_survives_source_removal_and_edit_then_is_cleaned_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.PFX");
+        std::fs::write(&source, PFX).unwrap();
+        let store = ProfileStore::at(dir.path().join("config/profiles.toml"));
+        let mut profiles = store
+            .save_importing_certificate(vec![connection(&source)], "sharepoint", None)
+            .unwrap();
+        let stored = PathBuf::from(&profiles[0].options["certificate_path"]);
+        assert_ne!(stored, source);
+        assert_eq!(profiles[0].options["certificate_name"], "source.PFX");
+        assert_eq!(std::fs::read(&stored).unwrap(), PFX);
+        std::fs::remove_file(&source).unwrap();
+        let credential =
+            crate::sharepoint_auth::CertificateCredential::load(stored.to_str().unwrap(), PASSWORD)
+                .unwrap();
+        credential
+            .assertion("app-id", "https://example.com/token")
+            .unwrap();
+        assert_eq!(store.load().unwrap(), profiles);
+        profiles[0].name = "Renamed".into();
+        profiles = store
+            .save_importing_certificate(profiles, "sharepoint", None)
+            .unwrap();
+        assert_eq!(
+            profiles[0].options["certificate_path"],
+            stored.to_str().unwrap()
+        );
+        assert_eq!(
+            std::fs::read_dir(stored.parent().unwrap()).unwrap().count(),
+            1
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&stored).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                std::fs::metadata(stored.parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+            assert_eq!(
+                std::fs::metadata(store.path())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        store.save(&[]).unwrap();
+        assert!(!stored.exists());
+    }
+
+    #[test]
+    fn staged_bytes_save_without_source_and_replacements_keep_shared_certificates() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("already-deleted.pfx");
+        let store = ProfileStore::at(dir.path().join("profiles.toml"));
+        let mut profiles = store
+            .save_importing_certificate(vec![connection(&source)], "sharepoint", Some(PFX))
+            .unwrap();
+        let old = PathBuf::from(&profiles[0].options["certificate_path"]);
+        let mut shared = profiles[0].clone();
+        shared.id = "shared".into();
+        profiles.push(shared);
+        store.save(&profiles).unwrap();
+        profiles = store
+            .save_importing_certificate(profiles, "sharepoint", Some(PFX))
+            .unwrap();
+        let new = PathBuf::from(&profiles[0].options["certificate_path"]);
+        assert_ne!(old, new);
+        assert!(old.exists(), "another connection still references it");
+        store.save(&profiles[..1]).unwrap();
+        assert!(!old.exists());
+        assert!(new.exists());
+        let mut secret = profiles[0].clone();
+        secret.options.remove("certificate_path");
+        secret.options.remove("certificate_password");
+        secret
+            .options
+            .insert("auth_method".into(), "client_secret".into());
+        secret
+            .options
+            .insert("client_secret".into(), "secret".into());
+        store.save(&[secret]).unwrap();
+        assert!(!new.exists());
+    }
+
+    #[test]
+    fn rejected_imports_and_failed_config_write_leave_existing_credentials_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("original.pfx");
+        std::fs::write(&source, PFX).unwrap();
+        let store = ProfileStore::at(dir.path().join("profiles.toml"));
+        let profiles = store
+            .save_importing_certificate(vec![connection(&source)], "sharepoint", None)
+            .unwrap();
+        let stored = PathBuf::from(&profiles[0].options["certificate_path"]);
+        let old_text = std::fs::read(store.path()).unwrap();
+        let mut wrong_password = profiles.clone();
+        wrong_password[0]
+            .options
+            .insert("certificate_password".into(), "DO-NOT-ECHO-THIS".into());
+        let error = store
+            .save_importing_certificate(wrong_password, "sharepoint", Some(PFX))
+            .unwrap_err();
+        assert!(!error.full_message().contains("DO-NOT-ECHO-THIS"));
+        assert!(
+            store
+                .save_importing_certificate(profiles.clone(), "sharepoint", Some(b"invalid pfx"))
+                .is_err()
+        );
+        assert!(
+            store
+                .save_importing_certificate(
+                    profiles.clone(),
+                    "sharepoint",
+                    Some(&vec![0; 1024 * 1024 + 1])
+                )
+                .is_err()
+        );
+        assert_eq!(std::fs::read(store.path()).unwrap(), old_text);
+        assert_eq!(
+            std::fs::read_dir(stored.parent().unwrap()).unwrap().count(),
+            1
+        );
+        // A directory at the target config path makes the final rename fail.
+        std::fs::remove_file(store.path()).unwrap();
+        std::fs::create_dir(store.path()).unwrap();
+        assert!(
+            store
+                .save_importing_certificate(profiles, "sharepoint", Some(PFX))
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read_dir(stored.parent().unwrap()).unwrap().count(),
+            1
+        );
+        assert_eq!(std::fs::read(&stored).unwrap(), PFX);
+        assert_eq!(std::fs::read(&source).unwrap(), PFX);
+        assert!(!std::fs::read_dir(dir.path()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|s| s == "tmp")
+        }));
+    }
+
+    #[test]
+    fn deleting_legacy_profiles_never_removes_external_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join(format!("{}.pfx", uuid::Uuid::new_v4()));
+        std::fs::write(&source, PFX).unwrap();
+        let store = ProfileStore::at(dir.path().join("config/profiles.toml"));
+        store.save(&[connection(&source)]).unwrap();
+        store.save(&[]).unwrap();
+        assert_eq!(std::fs::read(&source).unwrap(), PFX);
+        assert!(read_pfx_file(dir.path()).is_err());
+        let invalid = dir.path().join("other.txt");
+        std::fs::write(&invalid, PFX).unwrap();
+        assert!(read_pfx_file(&invalid).is_err());
     }
 }
 

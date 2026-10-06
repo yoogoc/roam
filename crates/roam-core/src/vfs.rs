@@ -154,7 +154,9 @@ impl Vfs {
         // a timeout on the outside drops the retry layer's future mid-flight and
         // leaves its body state broken, and a timed-out request is never retried
         // at all, which is the opposite of what a retry layer is for.
-        let op = if profile.scheme() == "nfs" {
+        let op = if profile.scheme() == "sharepoint" {
+            crate::sharepoint::operator(profile)?
+        } else if profile.scheme() == "nfs" {
             Operator::new(crate::nfs::NfsBuilder(crate::nfs::NfsConfig::from_profile(
                 profile,
             )?))?

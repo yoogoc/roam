@@ -3,7 +3,7 @@
   <h1>Roam</h1>
   <p><strong>One fast desktop file browser for local and remote storage.</strong></p>
   <p>
-    Browse your disk, object storage, WebDAV, and NFS from the same native window.<br>
+    Browse your disk, object storage, WebDAV, NFS, and SharePoint from the same native window.<br>
     Move files across backends without changing tools.
   </p>
   <p>
@@ -39,6 +39,7 @@ server can stay open side by side while Roam transfers data between them.
 | **Azure Blob Storage** | Account key, SAS/AAD fallback, and optional Azurite-compatible endpoint. |
 | **WebDAV** | HTTPS endpoint with optional username, password, and remote path. |
 | **NFSv3** | Direct TCP connection with AUTH_SYS; no system mount is required. |
+| **SharePoint Online** | Microsoft Graph libraries by Drive ID; Client Secret, PFX certificate, access token or refresh token authentication, and an optional library subdirectory. |
 
 The connection editor is generated from the same backend schema used for
 validation and operator construction. It only asks for fields that apply to the
@@ -48,6 +49,70 @@ selected service and keeps secret values masked in the UI.
 > Connection credentials are stored in `profiles.toml` as plaintext with file
 > mode `0600` on Unix. Do not sync, commit, or paste this file into an issue.
 > Anyone who can read it can read the saved credentials.
+
+### SharePoint Online
+
+Select **SharePoint** in the connection editor and enter the document library's
+**Drive ID**. This identifies a library, rather than a site URL or sharing link.
+To find it, resolve your site with
+[`GET /sites/{hostname}:/{site-path}`](https://learn.microsoft.com/en-us/graph/api/site-getbypath?view=graph-rest-1.0),
+then list its libraries with
+[`GET /sites/{site-id}/drives`](https://learn.microsoft.com/en-us/graph/api/drive-list?view=graph-rest-1.0)
+and copy the target library's `id`. Leave **Directory** empty to browse the
+library root, or enter a path within that library.
+
+Choose one authentication method:
+
+- **Client Secret (default):** enter **Tenant ID**, **Client ID**, and the
+  Entra application's **Client Secret value** (not its secret ID). Roam obtains
+  Microsoft Graph access tokens automatically using `client_credentials` and
+  renews them before expiry. No access or refresh token needs to be entered.
+- **PFX certificate:** enter **Tenant ID** and **Client ID**, then drag one
+  `.pfx`/`.p12` file into the connection dialog (or use **Choose file**) and
+  enter its password if any. The file must contain one RSA private key of at
+  least 2048 bits and its matching certificate. The matching public
+  certificate must already be registered on the Entra application. Roam signs
+  PS256 client assertions and automatically obtains and renews access tokens.
+  Dropping stages the file in memory. Saving validates it and copies it into
+  Roam's configuration directory under `certificates/`, with owner-only file
+  permissions on Unix. The original file can then be moved or deleted;
+  profiles point at Roam's copy and retain the password and display filename.
+  Cancelling discards the staged file. Replacing the certificate or deleting
+  the connection removes copies no longer used by any saved connection.
+  Older connections using external certificate paths are imported on their
+  next save. Modern and legacy PKCS#12
+  encryption are supported; PFX passwords retain leading and trailing spaces.
+- **Access token:** paste a Microsoft Graph token with access to the library.
+  When it expires, edit the connection and replace it.
+- **Refresh token:** enter a delegated refresh token and the **Client ID** of
+  the Entra application that issued it. Public clients leave **Client Secret**
+  empty; confidential clients also supply their secret. Roam refreshes access
+  tokens automatically and keeps rotated refresh tokens for the current session.
+
+For application authentication, use Microsoft Graph **application** permissions
+with administrator consent: `Sites.Read.All` for reading, `Sites.ReadWrite.All`
+for writing, or `Sites.Selected` with a separate grant on the target site.
+Delegated permissions alone do not grant an application access. Tenant ID can
+be a directory ID or verified tenant domain (for example,
+`contoso.onmicrosoft.com`). These credentials must belong to an Entra app
+registration; legacy SharePoint ACS app secrets are not supported. See
+[client credentials](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-client-creds-grant-flow),
+[certificate assertions](https://learn.microsoft.com/en-us/entra/identity-platform/certificate-credentials),
+and [selected permissions](https://learn.microsoft.com/en-us/graph/permissions-selected-overview).
+
+The token must target Microsoft Graph, and the application must have consented
+permissions for the library. For delegated access, `Files.Read.All` allows
+reading accessible files and `Files.ReadWrite.All` allows writing them;
+site discovery additionally requires `Sites.Read.All`. Request `offline_access`
+when obtaining a refresh token. See the
+[Microsoft Graph permissions reference](https://learn.microsoft.com/en-us/graph/permissions-reference)
+and [OAuth flow documentation](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow).
+
+This connection supports SharePoint Online on the global Microsoft Graph
+endpoint. Browser sign-in,
+SharePoint Server, national cloud endpoints, share links, and version history
+are not available. Uploads above 4 MiB use Graph upload sessions; uploads retain
+Roam's existing 512 MiB limit for backends that require a complete file buffer.
 
 ### NFS requirements
 
@@ -134,6 +199,18 @@ Read [docs/DESIGN.md](docs/DESIGN.md) for the design decisions, measured scale
 results, and backend behavior discovered during implementation.
 
 ## Development
+
+`cargo run` optimizes the GPUI layout and drawing dependencies while retaining
+debug builds for Roam's own crates. To inspect connection-dialog frame timings:
+
+```bash
+ROAM_DIALOG_PROFILE=/tmp/roam-dialog-profile.txt \
+  cargo run -p roam-ui --features profiler --example connection_dialog
+# Add -- --compact to check the narrow-window layout.
+```
+
+Interact with the dialog, then read the timing file for draw and input latency
+percentiles. Profiling is optional and disabled in normal builds.
 
 Run the same checks used by CI:
 

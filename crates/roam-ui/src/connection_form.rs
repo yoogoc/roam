@@ -9,17 +9,23 @@
 //! rebuilds the field list, and a rebuild has to re-render.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme, Icon, IconName, StyledExt, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable, StyledExt, h_flex, v_flex,
+};
 use gpui_kit::{
-    AnyElement, App, AppContext, ClickEvent, Context, Entity, IntoElement, ParentElement, Render,
-    SharedString, Styled, Window, div, prelude::FluentBuilder, px,
+    AnyElement, App, AppContext, ClickEvent, Context, Entity, ExternalPaths, InteractiveElement,
+    IntoElement, ParentElement, PathPromptOptions, Render, SharedString, Styled, Task, Window, div,
+    prelude::FluentBuilder, px,
 };
 use roam_core::service::{self, Field, FieldKind, Service};
-use roam_core::{Profile, ProfileId, Result, profile};
+use roam_core::{Profile, ProfileId, Result, SharePointAuthMethod, profile};
 
 use crate::placeholders;
 
@@ -34,7 +40,14 @@ struct FieldInput {
 impl FieldInput {
     fn value(&self, cx: &App) -> String {
         match (&self.state, self.field.kind) {
-            (Some(state), _) => state.read(cx).value().trim().to_string(),
+            (Some(state), _) => {
+                let value = state.read(cx).value();
+                if self.field.key == "certificate_password" {
+                    value.to_string()
+                } else {
+                    value.trim().to_string()
+                }
+            }
             (None, FieldKind::Toggle { on, off }) => {
                 if self.on {
                     on.to_string()
@@ -53,6 +66,13 @@ pub struct ConnectionForm {
     name: Entity<InputState>,
     scheme: &'static str,
     fields: Vec<FieldInput>,
+    sharepoint_auth_explicit: bool,
+    certificate_name: Option<String>,
+    certificate_bytes: Option<Arc<Vec<u8>>>,
+    certificate_error: Option<String>,
+    certificate_loading: bool,
+    certificate_import: Option<Task<()>>,
+    saving: bool,
 }
 
 impl ConnectionForm {
@@ -64,6 +84,13 @@ impl ConnectionForm {
                 .new(|cx| InputState::new(window, cx).placeholder(placeholders::CONNECTION_NAME)),
             scheme: service.scheme,
             fields: Vec::new(),
+            sharepoint_auth_explicit: true,
+            certificate_name: None,
+            certificate_bytes: None,
+            certificate_error: None,
+            certificate_loading: false,
+            certificate_import: None,
+            saving: false,
         };
         this.rebuild(&BTreeMap::new(), window, cx);
         this
@@ -72,6 +99,8 @@ impl ConnectionForm {
     pub fn editing(profile: &Profile, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut this = Self::new(window, cx);
         this.editing = Some(profile.id.clone());
+        this.sharepoint_auth_explicit = profile.options.contains_key("auth_method");
+        this.certificate_name = profile.options.get("certificate_name").cloned();
 
         this.name.update(cx, |state, cx| {
             state.set_value(profile.name.clone(), window, cx)
@@ -102,10 +131,25 @@ impl ConnectionForm {
             .fields
             .iter()
             .map(|field| {
-                let seeded = values
+                let mut seeded = values
                     .get(field.key)
                     .cloned()
                     .unwrap_or_else(|| field.default_value().to_string());
+                if field.key == "auth_method" && seeded.is_empty() {
+                    let inferred = if values.get("access_token").is_some_and(|v| !v.is_empty()) {
+                        SharePointAuthMethod::AccessToken
+                    } else if values.get("refresh_token").is_some_and(|v| !v.is_empty()) {
+                        SharePointAuthMethod::RefreshToken
+                    } else if values
+                        .get("certificate_path")
+                        .is_some_and(|v| !v.is_empty())
+                    {
+                        SharePointAuthMethod::Certificate
+                    } else {
+                        SharePointAuthMethod::ClientSecret
+                    };
+                    seeded = inferred.as_str().into();
+                }
 
                 match field.kind {
                     FieldKind::Toggle { on, .. } => FieldInput {
@@ -155,24 +199,132 @@ impl ConnectionForm {
     /// point: they are the same values, and retyping them is exactly the tedium
     /// this form exists to remove.
     fn set_scheme(&mut self, scheme: &'static str, window: &mut Window, cx: &mut Context<Self>) {
-        if self.scheme == scheme {
+        if self.scheme == scheme || self.saving {
             return;
         }
         let carried = self.values(cx);
         self.scheme = scheme;
+        self.certificate_import = None;
+        self.certificate_loading = false;
+        self.certificate_bytes = None;
+        self.certificate_name = None;
+        self.certificate_error = None;
+        self.sharepoint_auth_explicit = true;
         self.rebuild(&carried, window, cx);
         cx.notify();
     }
 
     fn values(&self, cx: &App) -> BTreeMap<String, String> {
-        self.fields
+        let auth = self.sharepoint_auth(cx);
+        let mut values: BTreeMap<_, _> = self
+            .fields
             .iter()
+            .filter(|input| self.scheme != "sharepoint" || auth.includes_field(input.field.key))
             .map(|input| (input.field.key.to_string(), input.value(cx)))
-            .collect()
+            .collect();
+        if self.scheme == "sharepoint" && self.sharepoint_auth_explicit {
+            values.insert("auth_method".into(), auth.as_str().into());
+        }
+        values
+    }
+
+    fn sharepoint_auth(&self, cx: &App) -> SharePointAuthMethod {
+        let value = self
+            .fields
+            .iter()
+            .find(|input| input.field.key == "auth_method")
+            .map(|input| input.value(cx))
+            .unwrap_or_default();
+        SharePointAuthMethod::ALL
+            .into_iter()
+            .find(|method| method.as_str() == value)
+            .unwrap_or(SharePointAuthMethod::ClientSecret)
+    }
+
+    fn set_sharepoint_auth(
+        &mut self,
+        method: SharePointAuthMethod,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.saving {
+            return;
+        }
+        if let Some(state) = self
+            .fields
+            .iter()
+            .find(|input| input.field.key == "auth_method")
+            .and_then(|input| input.state.clone())
+        {
+            state.update(cx, |state, cx| state.set_value(method.as_str(), window, cx));
+            self.sharepoint_auth_explicit = true;
+            cx.notify();
+        }
+    }
+
+    fn render_sharepoint_auth(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.scheme != "sharepoint" {
+            return div().into_any_element();
+        }
+        let selected = self.sharepoint_auth(cx);
+        let hint = match selected {
+            SharePointAuthMethod::ClientSecret => {
+                "填写租户、Client ID 和密钥，Roam 自动获取及续期访问令牌。"
+            }
+            SharePointAuthMethod::Certificate => {
+                "拖入 PFX 证书，Roam 会保存副本；对应公钥需已注册到 Entra 应用。"
+            }
+            SharePointAuthMethod::AccessToken => {
+                "使用已有 Microsoft Graph 令牌；到期后需要手动更新。"
+            }
+            SharePointAuthMethod::RefreshToken => {
+                "使用委托刷新令牌自动续期；公共客户端无需 Client Secret。"
+            }
+        };
+        v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .flex_wrap()
+                    .children(SharePointAuthMethod::ALL.map(|method| {
+                        let label = match method {
+                            SharePointAuthMethod::ClientSecret => "Client Secret",
+                            SharePointAuthMethod::Certificate => "PFX 证书",
+                            SharePointAuthMethod::AccessToken => "访问令牌",
+                            SharePointAuthMethod::RefreshToken => "刷新令牌",
+                        };
+                        Button::new(SharedString::from(format!("sp-auth-{}", method.as_str())))
+                            .small()
+                            .outline()
+                            .label(label)
+                            .selected(selected == method)
+                            .disabled(self.saving)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.set_sharepoint_auth(method, window, cx)
+                            }))
+                    })),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(hint),
+            )
+            .into_any_element()
     }
 
     /// Validate and assemble the profile to save.
     pub fn build(&self, taken: &[ProfileId], cx: &App) -> Result<Profile> {
+        if self.certificate_loading {
+            return Err(roam_core::Error::Config("正在读取证书，请稍候".into()));
+        }
+        if self.scheme == "sharepoint"
+            && self.sharepoint_auth(cx) == SharePointAuthMethod::Certificate
+            && let Some(error) = &self.certificate_error
+        {
+            return Err(roam_core::Error::Config(error.clone()));
+        }
         let name = self.name.read(cx).value().trim().to_string();
         if name.is_empty() {
             return Err(roam_core::Error::Config("请填写连接名称".into()));
@@ -183,7 +335,190 @@ impl ConnectionForm {
             None => profile::unique_id(&name, taken),
         };
 
-        service::build_profile(id, name, self.scheme, &self.values(cx))
+        let mut profile = service::build_profile(id, name, self.scheme, &self.values(cx))?;
+        if self.scheme == "sharepoint"
+            && self.sharepoint_auth(cx) == SharePointAuthMethod::Certificate
+            && let Some(name) = &self.certificate_name
+        {
+            profile
+                .options
+                .insert("certificate_name".into(), name.clone());
+        }
+        Ok(profile)
+    }
+
+    pub(crate) fn certificate_bytes(&self) -> Option<Arc<Vec<u8>>> {
+        self.certificate_bytes.clone()
+    }
+
+    pub(crate) fn is_saving(&self) -> bool {
+        self.saving
+    }
+
+    pub(crate) fn set_saving(&mut self, saving: bool, cx: &mut Context<Self>) {
+        self.saving = saving;
+        cx.notify();
+    }
+
+    /// Accept drops anywhere in the form while SharePoint is selected. Read
+    /// once in the background, so saving no longer depends on the source path.
+    pub(crate) fn drop_certificate(
+        &mut self,
+        paths: &[PathBuf],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.scheme != "sharepoint" || self.saving {
+            return;
+        }
+        self.certificate_import = None;
+        self.certificate_loading = false;
+        if paths.len() != 1 {
+            self.certificate_error = Some("一次只能导入一个 PFX 证书文件".into());
+            cx.notify();
+            return;
+        }
+        let path = paths[0].clone();
+        self.set_sharepoint_auth(SharePointAuthMethod::Certificate, window, cx);
+        self.certificate_loading = true;
+        self.certificate_error = None;
+        let handle = window.window_handle();
+        self.certificate_import = Some(cx.spawn(async move |this, cx| {
+            let source = path.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { profile::read_pfx_file(&source) })
+                .await;
+            let _ = handle.update(cx, |_, window, cx| {
+                let _ = this.update(cx, |form, cx| {
+                    form.certificate_loading = false;
+                    match result {
+                        Ok(bytes) => {
+                            form.certificate_bytes = Some(Arc::new(bytes));
+                            form.certificate_name = Some(
+                                path.file_name()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                                    .into_owned(),
+                            );
+                            if let Some(state) = form
+                                .fields
+                                .iter()
+                                .find(|input| input.field.key == "certificate_path")
+                                .and_then(|input| input.state.clone())
+                            {
+                                state.update(cx, |state, cx| {
+                                    state.set_value(path.to_string_lossy().into_owned(), window, cx)
+                                });
+                            }
+                        }
+                        Err(error) => form.certificate_error = Some(error.full_message()),
+                    }
+                    cx.notify();
+                });
+            });
+        }));
+        cx.notify();
+    }
+
+    fn choose_certificate(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.saving {
+            return;
+        }
+        let picker = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("导入 PFX 证书".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = picker.await {
+                let _ = this.update_in(cx, |form, window, cx| {
+                    form.drop_certificate(&paths, window, cx)
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn render_certificate(&self, cx: &mut Context<Self>) -> AnyElement {
+        let path = self
+            .fields
+            .iter()
+            .find(|f| f.field.key == "certificate_path")
+            .map(|f| f.value(cx))
+            .unwrap_or_default();
+        let name = self.certificate_name.clone().unwrap_or_else(|| {
+            Path::new(&path)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        });
+        let message = if self.certificate_loading {
+            "正在读取证书…"
+        } else if self.certificate_bytes.is_some() {
+            "已导入，保存连接后可移走原始文件"
+        } else if !path.is_empty() {
+            "证书将在保存时由 Roam 保管"
+        } else {
+            "将一个 .pfx 或 .p12 文件拖入此弹窗"
+        };
+        labelled(
+            "PFX 证书".into(),
+            true,
+            v_flex()
+                .id("pfx-certificate-drop-zone")
+                .gap_2()
+                .p_3()
+                .rounded_md()
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().secondary)
+                .drag_over::<ExternalPaths>(|style, _, _, cx| {
+                    style.border_color(cx.theme().primary)
+                })
+                .child(
+                    h_flex()
+                        .gap_3()
+                        .child(Icon::new(IconName::File).size_5().flex_none())
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap_1()
+                                .child(div().text_sm().truncate().child(if name.is_empty() {
+                                    "拖入 PFX 证书".to_string()
+                                } else {
+                                    name
+                                }))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(message),
+                                ),
+                        )
+                        .child(
+                            Button::new("choose-pfx-certificate")
+                                .small()
+                                .outline()
+                                .label(if path.is_empty() {
+                                    "选择文件"
+                                } else {
+                                    "更换证书"
+                                })
+                                .disabled(self.saving || self.certificate_loading)
+                                .on_click(cx.listener(Self::choose_certificate)),
+                        ),
+                )
+                .when_some(self.certificate_error.clone(), |el, error| {
+                    el.child(div().text_xs().text_color(cx.theme().danger).child(error))
+                })
+                .into_any_element(),
+            cx,
+        )
+        .into_any_element()
     }
 }
 
@@ -196,6 +531,7 @@ fn service_presentation(service: &Service) -> (&str, &str, IconName) {
         "azblob" => ("Azure Blob", "Microsoft Azure", IconName::Building2),
         "webdav" => ("WebDAV", "远程文件服务", IconName::Globe),
         "nfs" => ("NFS", "网络共享 · v3", IconName::FolderClosed),
+        "sharepoint" => ("SharePoint", "Microsoft 365 文档库", IconName::Building2),
         _ => (service.label, "", IconName::Globe),
     }
 }
@@ -208,6 +544,9 @@ fn service_description(scheme: &str) -> &'static str {
         "azblob" => "连接 Azure Blob Storage 容器。",
         "webdav" => "通过 WebDAV 访问服务器或 NAS 上的文件。",
         "nfs" => "直接访问 NFSv3 共享，无需先挂载到系统。",
+        "sharepoint" => {
+            "通过 Microsoft Graph 访问 SharePoint Online 文档库，支持应用密钥与 PFX 证书认证。"
+        }
         _ => "填写连接信息以开始浏览文件。",
     }
 }
@@ -222,7 +561,8 @@ enum FieldSection {
 fn field_section(field: &Field) -> FieldSection {
     match field.key {
         "nfs_port" | "mount_port" => FieldSection::Advanced,
-        "username" | "access_key_id" | "uid" | "gid" => FieldSection::Identity,
+        "username" | "access_key_id" | "uid" | "gid" | "client_id" | "tenant_id"
+        | "certificate_path" => FieldSection::Identity,
         _ if field.is_secret() => FieldSection::Identity,
         _ => FieldSection::Location,
     }
@@ -278,10 +618,23 @@ impl Render for ConnectionForm {
                     })),
             );
         }
+        let choices = v_flex()
+            .gap_1()
+            .when(compact, |el| el.flex_row().flex_wrap())
+            .children(buttons);
+        let choices = if compact {
+            choices.into_any_element()
+        } else {
+            choices
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scrollbar()
+                .into_any_element()
+        };
         let picker = v_flex()
             .gap_3()
             .flex_shrink_0()
-            .when(!compact, |el| el.w(px(180.)))
+            .when(!compact, |el| el.w(px(180.)).h_full())
             .child(
                 div()
                     .px_3()
@@ -289,19 +642,24 @@ impl Render for ConnectionForm {
                     .text_color(cx.theme().muted_foreground)
                     .child("连接类型"),
             )
-            .child(
-                v_flex()
-                    .gap_1()
-                    .when(compact, |el| el.flex_row().flex_wrap())
-                    .children(buttons),
-            );
+            .child(choices);
 
         // Snapshot before installing listeners, which need a mutable context.
+        let auth = self.sharepoint_auth(cx);
         let snapshot: Vec<_> = self
             .fields
             .iter()
             .enumerate()
-            .map(|(ix, input)| (ix, input.field, input.state.clone(), input.on))
+            .filter(|(_, input)| {
+                self.scheme != "sharepoint" || auth.includes_field(input.field.key)
+            })
+            .map(|(ix, input)| {
+                let mut field = input.field;
+                if self.scheme == "sharepoint" {
+                    field.required |= auth.field_required(field.key);
+                }
+                (ix, field, input.state.clone(), input.on)
+            })
             .collect();
         let mut sections = Vec::new();
         for (section, title) in [
@@ -327,10 +685,13 @@ impl Render for ConnectionForm {
             let rows: Vec<_> = inputs
                 .iter()
                 .map(|(ix, field, state, on)| {
-                    div()
-                        .min_w_0()
-                        .when(paired, |el| el.flex_1())
-                        .child(Self::render_field(*ix, *field, state.clone(), *on, cx))
+                    div().min_w_0().when(paired, |el| el.flex_1()).child(
+                        if field.key == "certificate_path" {
+                            self.render_certificate(cx)
+                        } else {
+                            Self::render_field(*ix, *field, state.clone(), *on, self.saving, cx)
+                        },
+                    )
                 })
                 .collect();
             let hint = match section {
@@ -344,6 +705,11 @@ impl Render for ConnectionForm {
                 }
                 FieldSection::Advanced => Some("通常无需修改，留空时自动发现服务端口。"),
                 _ => None,
+            };
+            let auth_picker = if section == FieldSection::Identity {
+                self.render_sharepoint_auth(cx)
+            } else {
+                div().into_any_element()
             };
             sections.push(
                 v_flex()
@@ -360,6 +726,7 @@ impl Render for ConnectionForm {
                             )
                             .child(div().flex_1().h(px(1.)).bg(cx.theme().border)),
                     )
+                    .child(auth_picker)
                     .when_some(hint, |el, hint| {
                         el.child(
                             div()
@@ -381,6 +748,7 @@ impl Render for ConnectionForm {
             .flex_1()
             .min_w_0()
             .gap_5()
+            .when(compact, |el| el.flex_none())
             .when(!compact, |el| {
                 el.border_l_1().border_color(cx.theme().border).pl_5()
             })
@@ -401,20 +769,46 @@ impl Render for ConnectionForm {
             .child(labelled(
                 "连接名称".into(),
                 true,
-                Input::new(&self.name).into_any_element(),
+                Input::new(&self.name)
+                    .disabled(self.saving)
+                    .into_any_element(),
                 cx,
             ))
             .children(sections);
 
-        // Only the dialog body scrolls. Never cap this content: a capped inner
-        // scroll wrapper clips the last fields instead of exposing overflow.
-        h_flex()
-            .w_full()
+        let details = if compact {
+            details.into_any_element()
+        } else {
+            details
+                .h_full()
+                .overflow_y_scrollbar()
+                .id(SharedString::from(format!(
+                    "connection-fields-{}",
+                    self.scheme
+                )))
+                .into_any_element()
+        };
+        let body = h_flex()
+            .id("connection-form-body")
+            .size_full()
             .items_start()
             .gap_5()
             .when(compact, |el| el.flex_col().items_stretch())
             .child(picker)
             .child(details)
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                this.drop_certificate(paths.paths(), window, cx);
+            }));
+        if compact {
+            body.overflow_y_scrollbar()
+                .id(SharedString::from(format!(
+                    "connection-body-{}",
+                    self.scheme
+                )))
+                .into_any_element()
+        } else {
+            body.into_any_element()
+        }
     }
 }
 
@@ -424,13 +818,14 @@ impl ConnectionForm {
         field: Field,
         state: Option<Entity<InputState>>,
         on: bool,
+        saving: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match (state, field.kind) {
             (Some(state), _) => labelled(
                 field.label.into(),
                 field.required,
-                Input::new(&state).into_any_element(),
+                Input::new(&state).disabled(saving).into_any_element(),
                 cx,
             )
             .into_any_element(),
@@ -456,6 +851,7 @@ impl ConnectionForm {
                 .child(
                     Switch::new(SharedString::from(format!("tg-{ix}")))
                         .checked(on)
+                        .disabled(saving)
                         .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                             if let Some(slot) = this.fields.get_mut(ix) {
                                 slot.on = *checked;
@@ -490,6 +886,15 @@ fn labelled(
 
 #[cfg(test)]
 impl ConnectionForm {
+    pub(crate) fn choose_sharepoint_auth(
+        &mut self,
+        method: SharePointAuthMethod,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_sharepoint_auth(method, window, cx);
+    }
+
     pub(crate) fn set_name(&self, value: &str, window: &mut Window, cx: &mut App) {
         let value = value.to_string();
         self.name

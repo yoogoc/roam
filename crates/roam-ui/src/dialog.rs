@@ -11,9 +11,9 @@
 //! Hence this extension trait. Every dialog in the app goes through it, so the
 //! footer is one decision made once rather than five that can drift apart.
 
-use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_kit::component::dialog::{Dialog, DialogFooter};
+use gpui_kit::component::{Disableable, WindowExt};
 use gpui_kit::{App, ParentElement, SharedString, Window};
 
 /// The action behind a confirm button. Returns true when the dialog should
@@ -37,6 +37,17 @@ pub(crate) trait DialogButtons {
         action: impl Fn(&mut Window, &mut App) -> bool + 'static,
     ) -> Self;
 
+    /// Keeps an asynchronous save in the dialog, disabling dismissal while it
+    /// commits. Both explicit cancel and Escape/backdrop discard staged state.
+    fn confirm_cancel_busy(
+        self,
+        confirm: impl Into<SharedString>,
+        cancel: impl Into<SharedString>,
+        busy: bool,
+        action: impl Fn(&mut Window, &mut App) -> bool + 'static,
+        closed: impl Fn(&mut Window, &mut App) + 'static,
+    ) -> Self;
+
     /// One button, which closes the dialog. For a dialog that only shows
     /// something and has nothing to confirm.
     fn dismiss(self, label: impl Into<SharedString>) -> Self;
@@ -54,7 +65,9 @@ impl DialogButtons for Dialog {
             confirm.into(),
             ButtonVariant::Primary,
             cancel.into(),
+            false,
             action,
+            |_, _| {},
         )
     }
 
@@ -69,7 +82,30 @@ impl DialogButtons for Dialog {
             confirm.into(),
             ButtonVariant::Danger,
             cancel.into(),
+            false,
             action,
+            |_, _| {},
+        )
+    }
+
+    fn confirm_cancel_busy(
+        self,
+        confirm: impl Into<SharedString>,
+        cancel: impl Into<SharedString>,
+        busy: bool,
+        action: impl Fn(&mut Window, &mut App) -> bool + 'static,
+        closed: impl Fn(&mut Window, &mut App) + 'static,
+    ) -> Self {
+        with_footer(
+            self.keyboard(!busy)
+                .close_button(!busy)
+                .overlay_closable(!busy),
+            confirm.into(),
+            ButtonVariant::Primary,
+            cancel.into(),
+            busy,
+            action,
+            closed,
         )
     }
 
@@ -83,28 +119,45 @@ fn with_footer(
     confirm: SharedString,
     variant: ButtonVariant,
     cancel: SharedString,
+    busy: bool,
     action: impl Fn(&mut Window, &mut App) -> bool + 'static,
+    closed: impl Fn(&mut Window, &mut App) + 'static,
 ) -> Dialog {
     // The click and the Enter key run the same closure, so the two can never
     // decide differently about whether the dialog may close.
     let action = std::rc::Rc::new(action);
     let clicked = action.clone();
+    let closed = std::rc::Rc::new(closed);
+    let cancelled = closed.clone();
+    let confirmed = closed.clone();
 
     dialog
         .footer(
             DialogFooter::new()
-                .child(close_button("cancel", cancel))
+                .child(
+                    Button::new("cancel")
+                        .label(cancel)
+                        .outline()
+                        .disabled(busy)
+                        .on_click(move |_, window, cx| {
+                            cancelled(window, cx);
+                            window.close_dialog(cx);
+                        }),
+                )
                 .child(
                     Button::new("dialog-confirm")
                         .label(confirm)
                         .with_variant(variant)
+                        .disabled(busy)
                         .on_click(move |_, window, cx| {
                             if clicked(window, cx) {
+                                confirmed(window, cx);
                                 window.close_dialog(cx);
                             }
                         }),
                 ),
         )
+        .on_close(move |_, window, cx| closed(window, cx))
         .on_ok(move |_, window, cx| action(window, cx))
 }
 

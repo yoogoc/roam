@@ -40,6 +40,15 @@ tokio = { version = "1", features = [
     "io-util",
 ] }
 bytes = "1"
+http = "1"
+serde_json = "1"
+base64 = "0.22"
+p12-keystore = "0.3.2"
+rsa = { version = "0.9", features = ["sha2", "getrandom"] }
+sha2 = "0.10"
+x509-cert = "0.3"
+uuid = { version = "1", features = ["v4"] }
+url = "2"
 nfs3_client = { version = "0.9.0", features = ["tokio"] }
 futures = "0.3"
 anyhow = "1"
@@ -55,3 +64,20 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Previewing an archive only reads its central directory, so no compression
 # codecs are needed.
 zip = { version = "8.4", default-features = false }
+
+# Keep layout, text input and drawing responsive in `cargo run`; application
+# crates retain the default debug profile for quick edits and debugging.
+[profile.dev.package.gpui-pre]
+opt-level = 2
+
+[profile.dev.package.gpui-base]
+opt-level = 2
+
+[profile.dev.package.gpui-component]
+opt-level = 2
+
+[profile.dev.package.gpui-pre-macos]
+opt-level = 2
+
+[profile.dev.package.taffy]
+opt-level = 2
