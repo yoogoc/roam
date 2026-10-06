@@ -28,6 +28,24 @@ sha2.workspace = true
 x509-cert.workspace = true
 uuid.workspace = true
 url.workspace = true
+duckdb = { version = "1.10506.0", features = ["bundled", "json", "parquet"] }
+calamine = "0.36"
+tempfile = "3"
+csv = "1"
+apache-avro = "0.21"
+arrow-ipc = "58"
+rusqlite = { version = "0.39", features = ["bundled"] }
+quick-xml = "0.39"
+serde_yaml = "0.9"
+tar = "0.4"
+flate2 = "1"
+bzip2 = "0.6"
+xz2 = { version = "0.1", features = ["static"] }
+sevenz-rust2 = { version = "0.23", default-features = false, features = ["bzip2", "ppmd", "deflate"] }
+hayro = "0.8"
+image = { version = "0.25", default-features = false, features = ["png", "tiff", "ico", "jpeg"] }
+resvg = "0.46"
+tiff = "0.11"
 
 [dev-dependencies]
 nfs3_server = { version = "0.11.0", features = ["memfs"] }

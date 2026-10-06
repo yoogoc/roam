@@ -406,12 +406,18 @@ impl Browser {
             let entry = self.selected_entry(cx);
             self.preview
                 .update(cx, |panel, cx| panel.set_entry(entry, cx));
+        } else {
+            self.preview.update(cx, |panel, cx| panel.stop_audio(cx));
         }
         cx.notify();
     }
 
     pub fn preview_open(&self) -> bool {
         self.preview_open
+    }
+
+    pub(crate) fn stop_preview_audio(&mut self, cx: &mut Context<Self>) {
+        self.preview.update(cx, |panel, cx| panel.stop_audio(cx));
     }
 
     fn key(&self, dir: &str) -> RemotePath {
@@ -2252,6 +2258,41 @@ mod preview_tests {
     use super::tests::*;
     use gpui_kit::TestAppContext;
     use std::io::{Cursor, Write};
+
+    #[gpui_kit::test]
+    fn csv_records_use_the_duckdb_grid(cx: &mut TestAppContext) {
+        let mut h = Harness::new(cx);
+        h.write_file("data.csv", b"id,name\n7,hello\n");
+        h.reload_now();
+        h.select_row("data.csv");
+        h.settle_preview();
+        assert_eq!(h.preview_state(), "table");
+        assert_eq!(h.preview_body().unwrap(), "7\thello");
+    }
+    #[gpui_kit::test]
+    fn json_objects_and_record_arrays_choose_different_views(cx: &mut TestAppContext) {
+        let mut h = Harness::new(cx);
+        h.write_file("object.json", br#"{"name":"hello"}"#);
+        h.write_file("rows.json", br#"[{"id":7,"name":"hello"}]"#);
+        h.reload_now();
+        h.select_row("object.json");
+        h.settle_preview();
+        assert_eq!(h.preview_state(), "structured");
+        h.select_row("rows.json");
+        h.settle_preview();
+        assert_eq!(h.preview_state(), "table");
+    }
+    #[gpui_kit::test]
+    fn changing_selection_discards_a_pending_table_parse(cx: &mut TestAppContext) {
+        let mut h = Harness::new(cx);
+        h.write_file("data.csv", b"id,name\n7,hello\n");
+        h.reload_now();
+        h.select_row("data.csv");
+        h.select_row("notes.txt");
+        h.settle_preview();
+        assert_eq!(h.preview_state(), "text");
+        assert_eq!(h.preview_body().unwrap(), "note");
+    }
 
     #[gpui_kit::test]
     fn the_panel_starts_empty(cx: &mut TestAppContext) {

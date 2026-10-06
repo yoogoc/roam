@@ -61,9 +61,9 @@ toml = "1.1"
 directories = "6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-# Previewing an archive only reads its central directory, so no compression
-# codecs are needed.
-zip = { version = "8.4", default-features = false }
+# Archive trees only read metadata; Office and workbook previews also decode
+# deflated ZIP entries.
+zip = { version = "8.4", default-features = false, features = ["deflate"] }
 
 # Keep layout, text input and drawing responsive in `cargo run`; application
 # crates retain the default debug profile for quick edits and debugging.

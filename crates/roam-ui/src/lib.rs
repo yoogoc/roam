@@ -13,6 +13,7 @@ mod dir_tree;
 mod name_dialog;
 pub mod placeholders;
 mod preview;
+mod preview_audio;
 mod shortcut_settings;
 mod transfer_panel;
 mod workspace;

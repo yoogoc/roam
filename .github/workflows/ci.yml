@@ -6,6 +6,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Bundled DuckDB compiles C++; limit parallel jobs to fit hosted runners.
+  CARGO_BUILD_JOBS: 2
   # Deliberately *not* `RUSTFLAGS: -D warnings`: that applies to the whole
   # dependency tree, so one upstream release could fail CI for a reason that has
   # nothing to do with this code — and the failure would look like ours. Denying

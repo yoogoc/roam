@@ -235,6 +235,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let id = self.next_tab_id;
+        if !self.tabs.is_empty() {
+            self.active_browser()
+                .clone()
+                .update(cx, |browser, cx| browser.stop_preview_audio(cx));
+        }
         self.next_tab_id += 1;
 
         let engine = self.engine.clone();
@@ -367,6 +372,9 @@ impl Workspace {
         if ix >= self.tabs.len() || ix == self.active {
             return;
         }
+        self.active_browser()
+            .clone()
+            .update(cx, |browser, cx| browser.stop_preview_audio(cx));
         self.active = ix;
         self.sync_tree(cx);
         cx.notify();

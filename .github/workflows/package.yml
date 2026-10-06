@@ -11,6 +11,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Bundled DuckDB compiles C++; limit parallel jobs to fit hosted runners.
+  CARGO_BUILD_JOBS: 2
 
 jobs:
   package:

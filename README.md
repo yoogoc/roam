@@ -25,7 +25,7 @@ server can stay open side by side while Roam transfers data between them.
 | **Browse at scale** | Virtualized tables, streamed listings, filtering, sorting, hidden-file controls, and a lazily loaded directory tree. |
 | **Work across storage** | Multiple independent tabs and cross-backend copy, upload, download, move, progress, cancellation, and resumable downloads. |
 | **Use familiar file tools** | Create folders, rename, duplicate, delete with confirmation, drag files in from Finder, and inspect capability-aware context menus. |
-| **Preview before opening** | Built-in previews for text, Markdown, images, directory trees, and ZIP contents, with bounded reads for remote storage. |
+| **Preview before opening** | DuckDB data grids, PDF pages, Office content, structured text, images, archive trees, audio controls, and video thumbnails, with bounded reads for remote storage. |
 | **Stay in control** | Light and dark themes, collapsible sidebar sections, editable keyboard shortcuts, and confirmation before closing a tab or quitting. |
 | **Inspect object history** | Browse, preview, download, and restore object versions when the backend exposes versioning. |
 
@@ -153,6 +153,9 @@ Without that override, `profiles.toml` and `shortcuts.toml` live in the platform
 configuration directory selected by the [`directories`] crate.
 
 ## Keyboard shortcuts
+
+See [supported preview formats and limits](docs/PREVIEWS.md) for file previews,
+DuckDB grids, and the optional FFmpeg requirement for video thumbnails.
 
 Open **Settings** from the bottom of the sidebar to edit every application
 shortcut. Changes are validated, saved, and applied immediately.

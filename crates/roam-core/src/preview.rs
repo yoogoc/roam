@@ -10,6 +10,16 @@ use std::path::Component;
 
 use crate::{DirEntry, path};
 
+pub mod archives;
+pub mod documents;
+pub mod media;
+mod rtf;
+pub mod structured;
+pub mod tables;
+
+/// Whole-file previews use a private staging file and never exceed this size.
+pub const FILE_LIMIT: u64 = 64 * 1024 * 1024;
+
 /// Bytes read for a text preview. Enough to see what a file is; small enough
 /// that it costs one ranged request.
 pub const TEXT_LIMIT: u64 = 128 * 1024;
@@ -33,6 +43,9 @@ pub enum ImageKind {
     Gif,
     Webp,
     Bmp,
+    Svg,
+    Tiff,
+    Ico,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +57,13 @@ pub enum PreviewKind {
     Image(ImageKind),
     /// ZIP archive, rendered as a tree of central-directory entries.
     Zip,
+    Archive,
+    Table,
+    Structured,
+    Pdf,
+    Document,
+    Audio,
+    Video,
     /// Nothing useful to show. Carries the reason, which is displayed.
     None(&'static str),
 }
@@ -55,6 +75,10 @@ const IMAGE_EXTENSIONS: &[(&str, ImageKind)] = &[
     ("gif", ImageKind::Gif),
     ("webp", ImageKind::Webp),
     ("bmp", ImageKind::Bmp),
+    ("svg", ImageKind::Svg),
+    ("tif", ImageKind::Tiff),
+    ("tiff", ImageKind::Tiff),
+    ("ico", ImageKind::Ico),
 ];
 
 /// Extensions worth reading as text. Anything not listed and not a known binary
@@ -144,6 +168,40 @@ pub fn classify(name: &str, size: Option<u64>) -> PreviewKind {
         };
     }
 
+    let kind = if [
+        "csv", "tsv", "parquet", "parq", "xlsx", "xls", "xlsb", "ods", "jsonl", "ndjson", "sqlite",
+        "sqlite3", "db", "duckdb", "ddb", "avro", "arrow", "arrows", "feather",
+    ]
+    .contains(&ext.as_str())
+    {
+        Some(PreviewKind::Table)
+    } else if ["json", "xml", "yaml", "yml", "toml"].contains(&ext.as_str()) {
+        Some(PreviewKind::Structured)
+    } else if ext == "pdf" {
+        Some(PreviewKind::Pdf)
+    } else if ["docx", "odt", "rtf", "pptx"].contains(&ext.as_str()) {
+        Some(PreviewKind::Document)
+    } else if ["mp3", "wav", "flac", "ogg", "m4a"].contains(&ext.as_str()) {
+        Some(PreviewKind::Audio)
+    } else if ["mp4", "mov", "webm", "mkv"].contains(&ext.as_str()) {
+        Some(PreviewKind::Video)
+    } else if ["tar", "tgz", "7z"].contains(&ext.as_str())
+        || [".tar.gz", ".tar.bz2", ".tar.xz"]
+            .iter()
+            .any(|suffix| lower.ends_with(suffix))
+    {
+        Some(PreviewKind::Archive)
+    } else {
+        None
+    };
+    if let Some(kind) = kind {
+        return if size.is_some_and(|size| size > FILE_LIMIT) {
+            PreviewKind::None("文件超过 64 MiB，暂不预览")
+        } else {
+            kind
+        };
+    }
+
     if BINARY_EXTENSIONS.contains(&ext.as_str()) {
         return PreviewKind::None("二进制文件，暂不预览");
     }
@@ -176,10 +234,17 @@ pub fn looks_binary(bytes: &[u8]) -> bool {
 /// How many bytes to request for `kind`.
 pub fn read_limit(kind: &PreviewKind) -> u64 {
     match kind {
-        PreviewKind::Image(_) => IMAGE_LIMIT,
+        PreviewKind::Image(_) => IMAGE_LIMIT + 1,
         // One extra byte distinguishes a complete archive at the limit from an
         // unknown-size archive that exceeds it.
         PreviewKind::Zip => ZIP_LIMIT + 1,
+        PreviewKind::Table
+        | PreviewKind::Structured
+        | PreviewKind::Pdf
+        | PreviewKind::Document
+        | PreviewKind::Audio
+        | PreviewKind::Video
+        | PreviewKind::Archive => FILE_LIMIT + 1,
         _ => TEXT_LIMIT,
     }
 }
@@ -375,7 +440,7 @@ mod tests {
 
     #[test]
     fn known_binaries_are_refused() {
-        for name in ["movie.mp4", "lib.dylib", "data.parquet", "doc.pdf"] {
+        for name in ["lib.dylib", "disk.iso", "archive.rar"] {
             assert_eq!(
                 classify(name, Some(10)),
                 PreviewKind::None("二进制文件，暂不预览"),
@@ -424,7 +489,77 @@ mod tests {
     #[test]
     fn read_limits_differ_by_kind() {
         assert_eq!(read_limit(&PreviewKind::Text), TEXT_LIMIT);
-        assert_eq!(read_limit(&PreviewKind::Image(ImageKind::Png)), IMAGE_LIMIT);
+        assert_eq!(
+            read_limit(&PreviewKind::Image(ImageKind::Png)),
+            IMAGE_LIMIT + 1
+        );
+    }
+
+    #[test]
+    fn extended_formats_are_classified_and_bounded() {
+        for (kind, names) in [
+            (
+                PreviewKind::Table,
+                vec![
+                    "a.csv",
+                    "a.tsv",
+                    "a.parquet",
+                    "a.parq",
+                    "a.xlsx",
+                    "a.xls",
+                    "a.xlsb",
+                    "a.ods",
+                    "a.jsonl",
+                    "a.ndjson",
+                    "a.sqlite",
+                    "a.sqlite3",
+                    "a.db",
+                    "a.duckdb",
+                    "a.ddb",
+                    "a.avro",
+                    "a.arrow",
+                    "a.arrows",
+                    "a.feather",
+                ],
+            ),
+            (
+                PreviewKind::Structured,
+                vec!["a.json", "a.xml", "a.yaml", "a.yml", "a.toml"],
+            ),
+            (PreviewKind::Pdf, vec!["a.pdf"]),
+            (
+                PreviewKind::Document,
+                vec!["a.docx", "a.odt", "a.rtf", "a.pptx"],
+            ),
+            (
+                PreviewKind::Archive,
+                vec![
+                    "a.tar",
+                    "a.tar.gz",
+                    "a.tgz",
+                    "a.tar.bz2",
+                    "a.tar.xz",
+                    "a.7z",
+                ],
+            ),
+            (
+                PreviewKind::Audio,
+                vec!["a.mp3", "a.wav", "a.flac", "a.ogg", "a.m4a"],
+            ),
+            (
+                PreviewKind::Video,
+                vec!["a.mp4", "a.mov", "a.webm", "a.mkv"],
+            ),
+        ] {
+            for name in names {
+                assert_eq!(classify(name, None), kind, "{name}");
+                assert!(matches!(
+                    classify(name, Some(FILE_LIMIT + 1)),
+                    PreviewKind::None(_)
+                ));
+                assert_eq!(read_limit(&kind), FILE_LIMIT + 1);
+            }
+        }
     }
 
     #[test]

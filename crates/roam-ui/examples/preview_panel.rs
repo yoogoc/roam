@@ -96,15 +96,31 @@ fn main() {
     let target = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "README.md".into());
-    let vfs = Vfs::local(rt, dir.path().to_str().unwrap()).expect("local session");
+    let requested = std::path::PathBuf::from(&target);
+    let (root, target) = if requested.exists() {
+        let requested = std::fs::canonicalize(requested).expect("preview path");
+        (
+            requested.parent().unwrap().to_path_buf(),
+            requested
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        )
+    } else {
+        (dir.path().to_path_buf(), target)
+    };
+    let vfs = Vfs::local(rt, root.to_str().unwrap()).expect("local session");
 
-    let size_on_disk = std::fs::metadata(dir.path().join(&target))
-        .ok()
-        .map(|m| m.len());
+    let size_on_disk = std::fs::metadata(root.join(&target)).ok().map(|m| m.len());
     let entry = DirEntry {
         name: target.clone().into(),
         path: target.clone().into(),
-        kind: EntryKind::File,
+        kind: if root.join(&target).is_dir() {
+            EntryKind::Dir
+        } else {
+            EntryKind::File
+        },
         size: size_on_disk,
         modified: None,
         etag: None,
@@ -119,7 +135,7 @@ fn main() {
             gpui_kit::init(cx);
             roam_ui::init(cx);
 
-            let bounds = Bounds::centered(None, size(px(420.), px(560.)), cx);
+            let bounds = Bounds::centered(None, size(px(760.), px(620.)), cx);
 
             cx.open_window(
                 WindowOptions {
