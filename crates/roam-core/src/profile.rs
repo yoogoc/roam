@@ -95,6 +95,9 @@ impl Profile {
         if self.scheme() == "nfs" {
             crate::nfs::NfsConfig::from_profile(self)?;
         }
+        if self.scheme().eq_ignore_ascii_case("sftp") {
+            crate::sftp::SftpConfig::from_profile(self)?;
+        }
         if self.scheme() == "sharepoint" {
             crate::sharepoint::validate(self)?;
         }
@@ -302,8 +305,14 @@ impl ProfileStore {
     }
 
     pub fn save(&self, profiles: &[Profile]) -> Result<()> {
+        let old = self.load().unwrap_or_default();
+        // Keep unchanged legacy/partial profiles editable. Only new or modified
+        // connections must pass today's schema; one old SFTP entry must not
+        // block saving another connection or approving its host fingerprint.
         for profile in profiles {
-            profile.validate()?;
+            if !old.contains(profile) {
+                profile.validate()?;
+            }
         }
 
         let text = toml::to_string_pretty(&ProfilesFile {
@@ -318,7 +327,6 @@ impl ProfileStore {
 
         // Replace atomically: a failed save must retain both the old profile and
         // the certificate it references. The temporary file is owner-only too.
-        let old = self.load().unwrap_or_default();
         let temporary = self
             .path
             .with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
@@ -354,8 +362,11 @@ impl ProfileStore {
         changed_id: &str,
         staged: Option<&[u8]>,
     ) -> Result<Vec<Profile>> {
+        let old = self.load().unwrap_or_default();
         for profile in &profiles {
-            profile.validate()?;
+            if !old.contains(profile) {
+                profile.validate()?;
+            }
         }
         let profile = profiles
             .iter_mut()
@@ -913,6 +924,28 @@ uri = "fs:///tmp"
         // And the broken one still refuses to connect, with a reason.
         assert!(profiles[0].validate().is_err());
         profiles[1].validate().unwrap();
+    }
+
+    #[test]
+    fn unchanged_incomplete_profiles_do_not_block_saving_other_connections() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.toml");
+        std::fs::write(
+            &path,
+            "[[profile]]\nid = 'old'\nname = 'Old SSH'\nuri = 'sftp:///'\n",
+        )
+        .unwrap();
+        let store = ProfileStore::at(&path);
+        let mut profiles = store.load().unwrap();
+        profiles.push(Profile::new("local", "Local", "fs:///tmp"));
+        store.save(&profiles).unwrap();
+        assert_eq!(store.load().unwrap(), profiles);
+        let saved = std::fs::read(&path).unwrap();
+        profiles[0].name = "changed".into();
+        assert!(store.save(&profiles).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), saved);
+        profiles.remove(0);
+        store.save(&profiles).unwrap();
     }
 
     #[test]

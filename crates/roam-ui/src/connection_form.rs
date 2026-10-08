@@ -42,7 +42,7 @@ impl FieldInput {
         match (&self.state, self.field.kind) {
             (Some(state), _) => {
                 let value = state.read(cx).value();
-                if self.field.key == "certificate_password" {
+                if self.field.is_secret() {
                     value.to_string()
                 } else {
                     value.trim().to_string()
@@ -530,6 +530,7 @@ fn service_presentation(service: &Service) -> (&str, &str, IconName) {
         "gcs" => ("Google Cloud", "Cloud Storage", IconName::Globe),
         "azblob" => ("Azure Blob", "Microsoft Azure", IconName::Building2),
         "webdav" => ("WebDAV", "远程文件服务", IconName::Globe),
+        "sftp" => ("SFTP", "SSH · 用户名与密码", IconName::Globe),
         "nfs" => ("NFS", "网络共享 · v3", IconName::FolderClosed),
         "sharepoint" => ("SharePoint", "Microsoft 365 文档库", IconName::Building2),
         _ => (service.label, "", IconName::Globe),
@@ -543,6 +544,7 @@ fn service_description(scheme: &str) -> &'static str {
         "gcs" => "连接 Google Cloud Storage 存储桶。",
         "azblob" => "连接 Azure Blob Storage 容器。",
         "webdav" => "通过 WebDAV 访问服务器或 NAS 上的文件。",
+        "sftp" => "使用 SSH 用户名和密码访问文件，首次连接时确认服务器指纹。",
         "nfs" => "直接访问 NFSv3 共享，无需先挂载到系统。",
         "sharepoint" => {
             "通过 Microsoft Graph 访问 SharePoint Online 文档库，支持应用密钥与 PFX 证书认证。"
@@ -560,7 +562,7 @@ enum FieldSection {
 
 fn field_section(field: &Field) -> FieldSection {
     match field.key {
-        "nfs_port" | "mount_port" => FieldSection::Advanced,
+        "nfs_port" | "mount_port" | "host_key" => FieldSection::Advanced,
         "username" | "access_key_id" | "uid" | "gid" | "client_id" | "tenant_id"
         | "certificate_path" => FieldSection::Identity,
         _ if field.is_secret() => FieldSection::Identity,
@@ -702,6 +704,9 @@ impl Render for ConnectionForm {
                     if inputs.iter().any(|(_, field, _, _)| field.is_secret()) =>
                 {
                     Some(placeholders::CREDENTIAL_STORAGE_NOTE)
+                }
+                FieldSection::Advanced if self.scheme == "sftp" => {
+                    Some("已知服务器可使用 known_hosts；首次连接确认后，指纹保存到此连接。")
                 }
                 FieldSection::Advanced => Some("通常无需修改，留空时自动发现服务端口。"),
                 _ => None,

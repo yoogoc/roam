@@ -234,7 +234,28 @@ const WEBDAV: Service = Service {
 };
 
 /// Every supported backend, in the order the picker shows them on all platforms.
-pub static SERVICES: &[Service] = &[FS, S3, GCS, AZBLOB, WEBDAV, NFS, SHAREPOINT];
+pub static SERVICES: &[Service] = &[FS, S3, GCS, AZBLOB, WEBDAV, SFTP, NFS, SHAREPOINT];
+
+const SFTP: Service = Service {
+    scheme: "sftp",
+    label: "SFTP",
+    fields: &[
+        Field::text("server", "服务器", "主机名或 IP 地址，例如 nas.local").required(),
+        Field::text("port", "端口", "默认 22"),
+        Field::text("root", "远程目录", "默认 /，例如 /home/user/files")
+            .prefix()
+            .absolute(),
+        Field::text("username", "用户名", "SSH 登录用户名").required(),
+        Field::text("password", "密码", "SSH 登录密码")
+            .secret()
+            .required(),
+        Field::text(
+            "host_key",
+            "服务器指纹",
+            "可留空，首次连接时确认 SHA256 指纹",
+        ),
+    ],
+};
 
 const SHAREPOINT: Service = Service {
     scheme: "sharepoint",
@@ -314,7 +335,9 @@ const NFS: Service = Service {
 };
 
 pub fn for_scheme(scheme: &str) -> Option<&'static Service> {
-    SERVICES.iter().find(|s| s.scheme == scheme)
+    SERVICES
+        .iter()
+        .find(|s| s.scheme.eq_ignore_ascii_case(scheme))
 }
 
 /// Assemble a profile from what the form collected.
@@ -340,7 +363,9 @@ pub fn build_profile(
         let value = values
             .get(field.key)
             .map(|v| {
-                if field.key == "certificate_password" {
+                if field.key == "certificate_password"
+                    || (scheme == "sftp" && field.key == "password")
+                {
                     v.as_str()
                 } else {
                     v.trim()
@@ -569,9 +594,30 @@ mod tests {
     }
 
     #[test]
-    fn sftp_is_not_an_available_connection_type() {
-        assert!(for_scheme("sftp").is_none());
-        assert!(build_profile("old".into(), "Old".into(), "sftp", &values(&[])).is_err());
+    fn sftp_password_profiles_round_trip_without_trimming_credentials() {
+        assert!(for_scheme("sftp").is_some());
+        let input = values(&[
+            ("server", "nas.local"),
+            ("username", "alice"),
+            ("password", " password "),
+            ("root", "/home/alice"),
+        ]);
+        let profile = build_profile("ssh".into(), "SFTP".into(), "sftp", &input).unwrap();
+        assert_eq!(profile.options["password"], " password ");
+        assert_eq!(profile.secret_keys(), ["password"]);
+        assert_eq!(profile.uri, "sftp:///home/alice");
+        assert_eq!(field_values(&profile)["root"], "/home/alice");
+        assert_eq!(
+            build_profile(
+                profile.id.clone(),
+                profile.name.clone(),
+                "sftp",
+                &field_values(&profile)
+            )
+            .unwrap(),
+            profile
+        );
+        assert!(build_profile("bad".into(), "SFTP".into(), "sftp", &values(&[])).is_err());
     }
 
     #[test]

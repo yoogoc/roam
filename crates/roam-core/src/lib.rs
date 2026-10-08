@@ -11,6 +11,8 @@ pub mod fmt;
 pub mod menu;
 pub mod model;
 mod nfs;
+mod sftp;
+pub use sftp::SftpHostKey;
 pub mod path;
 pub mod preview;
 pub mod profile;

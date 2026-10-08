@@ -140,11 +140,6 @@ impl Vfs {
 
     /// Build a session from a saved profile.
     pub fn from_profile(rt: Rt, profile: &Profile) -> Result<Self> {
-        if profile.scheme().eq_ignore_ascii_case("sftp") {
-            return Err(Error::Unsupported(
-                "SFTP 连接类型已移除，请删除该旧连接并使用其他受支持的类型".into(),
-            ));
-        }
         let options = profile.connect_options()?;
 
         // `from_uri` takes a single argument; options ride along as a tuple.
@@ -154,7 +149,11 @@ impl Vfs {
         // a timeout on the outside drops the retry layer's future mid-flight and
         // leaves its body state broken, and a timed-out request is never retried
         // at all, which is the opposite of what a retry layer is for.
-        let op = if profile.scheme() == "sharepoint" {
+        let op = if profile.scheme().eq_ignore_ascii_case("sftp") {
+            Operator::new(crate::sftp::SftpBuilder(
+                crate::sftp::SftpConfig::from_profile(profile)?,
+            ))?
+        } else if profile.scheme() == "sharepoint" {
             crate::sharepoint::operator(profile)?
         } else if profile.scheme() == "nfs" {
             Operator::new(crate::nfs::NfsBuilder(crate::nfs::NfsConfig::from_profile(
@@ -172,6 +171,11 @@ impl Vfs {
         .layer(ConcurrentLimitLayer::new(32));
 
         Ok(Self::from_operator(rt, op, &profile.name))
+    }
+
+    /// Probe a host key without sending the saved username/password.
+    pub async fn check_sftp_host(rt: Rt, profile: Profile) -> Result<Option<crate::SftpHostKey>> {
+        rt.spawn(crate::sftp::check_host(profile)).await
     }
 
     /// The context menu for `entry` on this backend.
@@ -1273,12 +1277,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn removed_sftp_profiles_fail_before_connecting() {
+    async fn incomplete_sftp_profiles_fail_before_connecting() {
         for uri in ["sftp:///upload", "SFTP:///upload"] {
             let profile = crate::Profile::new("old", "Old connection", uri);
             let error = Vfs::from_profile(Rt::from_current().unwrap(), &profile).unwrap_err();
-            assert!(matches!(error, Error::Unsupported(_)));
-            assert!(error.full_message().contains("SFTP 连接类型已移除"));
+            assert!(matches!(error, Error::Config(_)));
+            assert!(
+                error.full_message().contains("服务器") || error.full_message().contains("主机名")
+            );
         }
     }
 

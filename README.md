@@ -38,6 +38,7 @@ server can stay open side by side while Roam transfers data between them.
 | **Google Cloud Storage** | OAuth token or default credentials, with optional custom endpoint support. |
 | **Azure Blob Storage** | Account key, SAS/AAD fallback, and optional Azurite-compatible endpoint. |
 | **WebDAV** | HTTPS endpoint with optional username, password, and remote path. |
+| **SFTP** | Direct Rust SSH/SFTP client with username/password authentication and verified server fingerprints. |
 | **NFSv3** | Direct TCP connection with AUTH_SYS; no system mount is required. |
 | **SharePoint Online** | Microsoft Graph libraries by Drive ID; Client Secret, PFX certificate, access token or refresh token authentication, and an optional library subdirectory. |
 
@@ -113,6 +114,27 @@ endpoint. Browser sign-in,
 SharePoint Server, national cloud endpoints, share links, and version history
 are not available. Uploads above 4 MiB use Graph upload sessions; uploads retain
 Roam's existing 512 MiB limit for backends that require a complete file buffer.
+
+### SFTP
+
+Select **SFTP** and enter the server hostname or IP, port (default `22`),
+username and password. **Remote directory** defaults to `/` and sets the
+starting directory. Passwords retain leading and trailing spaces.
+
+Roam uses `russh` and `russh-sftp` directly for SSH authentication and file IO;
+OpenDAL's SFTP service and external SSH programs are not used. First connection
+checks `~/.ssh/known_hosts`. For an unknown server, Roam shows its SHA256
+fingerprint before sending credentials. Confirming saves that fingerprint in
+the connection; a changed fingerprint blocks authentication. You can also enter
+a verified SHA256 fingerprint under **Advanced**.
+
+Directory browsing, previews, streaming uploads/downloads, directory creation,
+rename and deletion are supported. Uploads use temporary files and publish by
+rename after completion. Overwriting requires a server that supports
+`posix-rename@openssh.com` (such as OpenSSH); on other servers an existing target
+may cause the upload to fail without replacing it. Server-side copy, share links,
+version history, key authentication and keyboard-interactive login are not
+available. Transfers can still stream files between connections.
 
 ### NFS requirements
 

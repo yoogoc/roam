@@ -17,8 +17,9 @@ cargo packager -p roam --release --formats nsis      # 或 wix
 
 ## 分发配置
 
-当前配置沿用 hardened runtime，未开启 App Sandbox。SFTP 已移除，应用不再为连接
-启动外部 SSH 程序，Linux 安装包也不再依赖 `openssh-client`。此次迁移没有改变签名、
+当前配置沿用 hardened runtime，未开启 App Sandbox。SFTP 使用 Rust 的 `russh` /
+`russh-sftp`，支持用户名密码认证，不启动外部 SSH 程序，Linux 安装包无需
+`openssh-client`。这次接入没有改变签名、
 文件访问权限或分发渠道；App Sandbox 和 App Store 分发仍需单独验证。
 
 ## 签名与公证
@@ -156,7 +157,7 @@ AppImage 的工具链在两个架构下都齐：`AppRun-{x86_64,aarch64}`、
 `linuxdeploy-{arch}.AppImage`、`linuxdeploy-plugin-appimage-{arch}.AppImage` 六个资产
 都实测返回 200。
 
-**Windows** — 提供与其他平台相同的五种连接类型。`profiles.toml` 的 `0600`
+**Windows** — 提供与其他平台相同的连接类型。`profiles.toml` 的 `0600`
 权限设置仍只在 Unix 生效，Windows 的配置文件访问控制需要通过 ACL 单独验证。
 
 ## 已验证 / 未验证

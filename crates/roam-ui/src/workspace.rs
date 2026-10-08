@@ -68,6 +68,7 @@ pub struct Workspace {
     error: Option<Error>,
     connections_collapsed: bool,
     directories_collapsed: bool,
+    connection_generation: u64,
 }
 
 impl Workspace {
@@ -218,6 +219,7 @@ impl Workspace {
             error,
             connections_collapsed: false,
             directories_collapsed: false,
+            connection_generation: 0,
         };
 
         this.open_tab(local, None, window, cx);
@@ -234,6 +236,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.connection_generation += 1;
         let id = self.next_tab_id;
         if !self.tabs.is_empty() {
             self.active_browser()
@@ -357,6 +360,7 @@ impl Workspace {
             return;
         }
 
+        self.connection_generation += 1;
         self.tabs.remove(ix);
         if self.active >= self.tabs.len() {
             self.active = self.tabs.len() - 1;
@@ -375,6 +379,7 @@ impl Workspace {
         self.active_browser()
             .clone()
             .update(cx, |browser, cx| browser.stop_preview_audio(cx));
+        self.connection_generation += 1;
         self.active = ix;
         self.sync_tree(cx);
         cx.notify();
@@ -448,14 +453,143 @@ impl Workspace {
             return;
         };
 
-        match Vfs::from_profile(self.rt.clone(), &profile) {
+        self.connection_generation += 1;
+        if profile.scheme().eq_ignore_ascii_case("sftp")
+            && profile
+                .options
+                .get("host_key")
+                .is_none_or(|key| key.trim().is_empty())
+        {
+            if let Err(error) = profile.validate() {
+                window.push_notification(error.full_message(), cx);
+                self.error = Some(error);
+                cx.notify();
+                return;
+            }
+            let generation = self.connection_generation;
+            let tab_id = self.active_tab().id;
+            let handle = window.window_handle();
+            let probe = Vfs::check_sftp_host(self.rt.clone(), profile.clone());
+            window.push_notification("正在检查 SFTP 服务器身份…", cx);
+            cx.spawn(async move |this, cx| {
+                let result = probe.await;
+                let _ = handle.update(cx, |_, window, cx| {
+                    let _ = this.update(cx, |workspace, cx| {
+                        if !workspace.connection_is_current(generation, tab_id, &profile) {
+                            return;
+                        }
+                        match result {
+                            Ok(None) => workspace.connect_ready(&profile, window, cx),
+                            Ok(Some(key)) => workspace
+                                .confirm_sftp_host(profile, key, generation, tab_id, window, cx),
+                            Err(error) => {
+                                window.push_notification(error.full_message(), cx);
+                                workspace.error = Some(error);
+                                cx.notify();
+                            }
+                        }
+                    });
+                });
+            })
+            .detach();
+            return;
+        }
+        self.connect_ready(&profile, window, cx);
+    }
+
+    fn connection_is_current(&self, generation: u64, tab_id: usize, profile: &Profile) -> bool {
+        self.connection_generation == generation
+            && self.active_tab().id == tab_id
+            && self.profiles.iter().any(|saved| saved == profile)
+    }
+
+    fn confirm_sftp_host(
+        &mut self,
+        profile: Profile,
+        key: roam_core::SftpHostKey,
+        generation: u64,
+        tab_id: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if window.has_active_dialog(cx) {
+            window.push_notification("请关闭当前对话框后重新连接 SFTP，以确认服务器身份", cx);
+            return;
+        }
+        let this = cx.weak_entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let this = this.clone();
+            let profile = profile.clone();
+            let fingerprint = key.fingerprint.clone();
+            dialog
+                .title("确认 SFTP 服务器身份")
+                .w(px(540.))
+                .child(div().text_sm().child(format!(
+                    "首次连接 {}:{}。请与服务器管理员提供的指纹核对，确认后才会发送登录密码。",
+                    key.server, key.port
+                )))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_family("ui-monospace")
+                        .child(key.fingerprint.clone()),
+                )
+                .confirm_cancel("信任并连接", "取消", move |window, cx| {
+                    this.update(cx, |workspace, cx| {
+                        workspace.approve_sftp_host(
+                            &profile,
+                            &fingerprint,
+                            generation,
+                            tab_id,
+                            window,
+                            cx,
+                        )
+                    })
+                    .unwrap_or(true)
+                })
+        });
+    }
+
+    fn approve_sftp_host(
+        &mut self,
+        profile: &Profile,
+        fingerprint: &str,
+        generation: u64,
+        tab_id: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.connection_is_current(generation, tab_id, profile) {
+            return true;
+        }
+        let mut updated = profile.clone();
+        updated
+            .options
+            .insert("host_key".into(), fingerprint.into());
+        let mut profiles = self.profiles.clone();
+        let slot = profiles
+            .iter_mut()
+            .find(|saved| saved.id == profile.id)
+            .unwrap();
+        *slot = updated.clone();
+        if let Err(error) = self.store.save(&profiles) {
+            window.push_notification(error.full_message(), cx);
+            return false;
+        }
+        self.profiles = profiles;
+        self.connect_ready(&updated, window, cx);
+        true
+    }
+
+    fn connect_ready(&mut self, profile: &Profile, window: &mut Window, cx: &mut Context<Self>) {
+        match Vfs::from_profile(self.rt.clone(), profile) {
             Ok(vfs) => {
                 self.error = None;
 
                 // Connecting swaps the *active* tab's session; other tabs keep
                 // whatever they were showing.
                 let ix = self.active;
-                self.tabs[ix].profile = Some(id);
+                self.tabs[ix].profile = Some(profile.id.clone());
                 let browser = self.tabs[ix].browser.clone();
                 browser.update(cx, |browser, cx| browser.set_vfs(vfs, cx));
                 self.sync_tree(cx);
@@ -473,6 +607,7 @@ impl Workspace {
     }
 
     fn connect_local(&mut self, cx: &mut Context<Self>) {
+        self.connection_generation += 1;
         self.error = None;
 
         // Must come from the retained local session, not from `browser.vfs()` —
@@ -513,16 +648,6 @@ impl Workspace {
     }
 
     fn open_form(&mut self, editing: Option<Profile>, window: &mut Window, cx: &mut Context<Self>) {
-        if editing
-            .as_ref()
-            .is_some_and(|p| p.scheme().eq_ignore_ascii_case("sftp"))
-        {
-            window.push_notification(
-                "SFTP 连接类型已移除，请删除该旧连接并新建其他类型的连接",
-                cx,
-            );
-            return;
-        }
         let form = cx.new(|cx| match &editing {
             Some(profile) => ConnectionForm::editing(profile, window, cx),
             None => ConnectionForm::new(window, cx),
@@ -1518,7 +1643,7 @@ pub(crate) mod tests {
     }
 
     #[gpui_kit::test]
-    fn removed_sftp_profiles_can_be_deleted_without_affecting_other_connections(
+    fn incomplete_sftp_profiles_can_be_edited_or_deleted_without_affecting_other_connections(
         cx: &mut TestAppContext,
     ) {
         let mut h = Harness::new(cx);
@@ -1526,20 +1651,27 @@ pub(crate) mod tests {
         h.add_profile(old.clone());
         let remote = h.add_remote_profile();
         let store = ProfileStore::at(&h.config_path);
+        // This profile was saved by the older schema, before password fields
+        // became required. Simulate its existing on-disk representation.
+        std::fs::write(
+            &h.config_path,
+            "[[profile]]\nid = 'old-sftp'\nname = 'Old SFTP'\nuri = 'sftp:///upload'\n",
+        )
+        .unwrap();
         store.save(&[old.clone(), remote.clone()]).unwrap();
         assert_eq!(store.load().unwrap().len(), 2);
 
         h.connect(&old.id);
         assert_eq!(h.active(), None);
-        assert!(h.error_message().unwrap().contains("SFTP 连接类型已移除"));
+        assert!(h.error_message().unwrap().contains("服务器"));
         assert_eq!(h.rows(), vec!["local-only.txt"]);
         let workspace = h.workspace.clone();
         h.cx.update(|window, cx| {
             workspace.update(cx, |w, cx| {
                 w.open_form(Some(old.clone()), window, cx);
                 assert!(
-                    w.form.is_none(),
-                    "an old profile must not turn into a local form"
+                    w.form.is_some(),
+                    "an old SFTP profile can be repaired in the connection form"
                 );
             });
         });
@@ -1694,6 +1826,95 @@ pub(crate) mod tests {
             text.contains("fs://"),
             "the URI is composed from the form: {text}"
         );
+    }
+
+    #[gpui_kit::test]
+    fn sftp_form_preserves_password_and_rejects_invalid_ports(cx: &mut TestAppContext) {
+        let mut h = Harness::new(cx);
+        h.cx.update(|window, cx| {
+            let form = cx.new(|cx| ConnectionForm::new(window, cx));
+            let profile = form.update(cx, |form, cx| {
+                form.choose_scheme("sftp", window, cx);
+                form.set_name("SSH server", window, cx);
+                assert!(form.build(&[], cx).is_err());
+                form.set_field("server", "nas.local", window, cx);
+                form.set_field("port", "2222", window, cx);
+                form.set_field("root", "/home/alice/文件", window, cx);
+                form.set_field("username", "alice", window, cx);
+                form.set_field("password", " password ", window, cx);
+                form.build(&[], cx).unwrap()
+            });
+            assert_eq!(profile.uri, "sftp:///home/alice/文件");
+            assert_eq!(profile.options["password"], " password ");
+            let edited = cx.new(|cx| ConnectionForm::editing(&profile, window, cx));
+            assert_eq!(edited.read(cx).build(&[], cx).unwrap(), profile);
+            edited.update(cx, |form, cx| {
+                form.set_field("port", "0", window, cx);
+                assert!(form.build(&[], cx).is_err());
+            });
+        });
+    }
+
+    #[gpui_kit::test]
+    fn sftp_host_confirmation_is_persisted_only_for_the_current_connection(
+        cx: &mut TestAppContext,
+    ) {
+        let mut h = Harness::new(cx);
+        let mut profile = Profile::new("ssh", "SSH", "sftp:///");
+        for (key, value) in [
+            ("server", "127.0.0.1"),
+            ("port", "1"),
+            ("username", "alice"),
+            ("password", "test"),
+        ] {
+            profile.options.insert(key.into(), value.into());
+        }
+        h.add_profile(profile.clone());
+        let fingerprint = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let workspace = h.workspace.clone();
+        h.cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                let generation = w.connection_generation;
+                let tab = w.active_tab().id;
+                w.confirm_sftp_host(
+                    profile.clone(),
+                    roam_core::SftpHostKey {
+                        server: "127.0.0.1".into(),
+                        port: 1,
+                        fingerprint: fingerprint.into(),
+                    },
+                    generation,
+                    tab,
+                    window,
+                    cx,
+                );
+                assert!(window.has_active_dialog(cx));
+                window.close_dialog(cx);
+                assert!(
+                    !w.store
+                        .load()
+                        .unwrap()
+                        .iter()
+                        .any(|p| p.options.contains_key("host_key"))
+                );
+                // A superseded attempt must never change the saved connection.
+                assert!(w.approve_sftp_host(
+                    &profile,
+                    fingerprint,
+                    generation + 1,
+                    tab,
+                    window,
+                    cx
+                ));
+                assert!(!w.profiles[0].options.contains_key("host_key"));
+                assert!(w.approve_sftp_host(&profile, fingerprint, generation, tab, window, cx));
+                assert_eq!(w.store.load().unwrap()[0].options["host_key"], fingerprint);
+                assert_eq!(w.active_tab().profile.as_deref(), Some("ssh"));
+                w.connect_local(cx);
+            });
+        });
+        h.settle();
+        assert_eq!(h.rows(), vec!["local-only.txt"]);
     }
 
     #[gpui_kit::test]
