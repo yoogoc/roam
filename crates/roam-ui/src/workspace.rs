@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
@@ -858,11 +859,14 @@ impl Workspace {
             .w(px(216.))
             .flex_none()
             .h_full()
+            .min_h_0()
+            .overflow_hidden()
             .bg(cx.theme().sidebar)
             .border_r_1()
             .border_color(cx.theme().sidebar_border)
             .child(
                 h_flex()
+                    .flex_none()
                     .px_2()
                     .py_1()
                     .items_center()
@@ -903,7 +907,19 @@ impl Workspace {
                     ),
             )
             .when(!self.connections_collapsed, |el| {
-                el.child(v_flex().flex_none().px_2().gap_px().children(rows))
+                // Stay compact for a few connections, then shrink into a scroll
+                // area so the directory tree and footer remain reachable.
+                el.child(
+                    v_flex()
+                        .h_auto()
+                        .min_h_0()
+                        .flex_shrink_1()
+                        .px_2()
+                        .gap_px()
+                        .children(rows)
+                        .overflow_y_scrollbar()
+                        .id("connection-list"),
+                )
             })
             .child(
                 v_flex()
@@ -1045,6 +1061,7 @@ impl Workspace {
             .id(SharedString::from(format!("conn-{id}")))
             .group("conn-row")
             .w_full()
+            .flex_shrink_0()
             .px_2()
             .py_1p5()
             .gap_2()
