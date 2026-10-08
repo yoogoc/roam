@@ -11,8 +11,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     AnyElement, App, AppContext, ClickEvent, Context, Entity, InteractiveElement, IntoElement,
-    MouseButton, ParentElement, Pixels, Render, SharedString, StatefulInteractiveElement, Styled,
-    Subscription, Window, div, prelude::FluentBuilder, px,
+    MouseButton, ParentElement, Pixels, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, Window, div, prelude::FluentBuilder, px,
 };
 use roam_core::transfer::DEFAULT_CONCURRENCY;
 use roam_core::{Error, Profile, ProfileId, ProfileStore, Rt, TransferEngine, Vfs};
@@ -29,6 +29,7 @@ use crate::transfer_panel::TransferPanel;
 
 /// Identifies the always-present local session, which has no saved profile.
 const LOCAL_SESSION: &str = "";
+const CONNECTION_ROW_HEIGHT: Pixels = px(52.);
 
 /// Top-level view: connection sidebar plus the browsing pane.
 /// One browsing tab.
@@ -68,6 +69,7 @@ pub struct Workspace {
     shortcut_interceptor: Option<Subscription>,
     error: Option<Error>,
     connections_collapsed: bool,
+    connections_scroll: ScrollHandle,
     directories_collapsed: bool,
     connection_generation: u64,
 }
@@ -219,6 +221,7 @@ impl Workspace {
             shortcut_interceptor: None,
             error,
             connections_collapsed: false,
+            connections_scroll: ScrollHandle::default(),
             directories_collapsed: false,
             connection_generation: 0,
         };
@@ -854,6 +857,8 @@ impl Workspace {
                 .into_any_element(),
             );
         }
+        let connections_height =
+            CONNECTION_ROW_HEIGHT * rows.len() as f32 + px(rows.len().saturating_sub(1) as f32);
 
         v_flex()
             .w(px(216.))
@@ -907,18 +912,21 @@ impl Workspace {
                     ),
             )
             .when(!self.connections_collapsed, |el| {
-                // Stay compact for a few connections, then shrink into a scroll
-                // area so the directory tree and footer remain reachable.
+                // Give the viewport a definite height. An auto-sized scrollbar
+                // wrapper can collapse to zero through its full-height child.
                 el.child(
                     v_flex()
-                        .h_auto()
+                        .id("connection-list")
+                        .relative()
+                        .h(connections_height)
                         .min_h_0()
                         .flex_shrink_1()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.connections_scroll)
                         .px_2()
                         .gap_px()
                         .children(rows)
-                        .overflow_y_scrollbar()
-                        .id("connection-list"),
+                        .vertical_scrollbar(&self.connections_scroll),
                 )
             })
             .child(
@@ -1061,6 +1069,7 @@ impl Workspace {
             .id(SharedString::from(format!("conn-{id}")))
             .group("conn-row")
             .w_full()
+            .h(CONNECTION_ROW_HEIGHT)
             .flex_shrink_0()
             .px_2()
             .py_1p5()
@@ -1095,7 +1104,7 @@ impl Workspace {
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .child(div().text_sm().child(name.to_string()))
+                    .child(div().text_sm().truncate().child(name.to_string()))
                     .child(
                         div()
                             .text_xs()
@@ -1696,6 +1705,87 @@ pub(crate) mod tests {
         assert_eq!(store.load().unwrap(), vec![remote.clone()]);
         h.connect(&remote.id);
         assert_eq!(h.rows(), vec!["remote-only.txt"]);
+    }
+
+    #[gpui_kit::test]
+    fn connections_are_visible_by_default_and_scroll_without_losing_local_session(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui_kit::{ScrollDelta, ScrollWheelEvent, point, size};
+        let mut h = Harness::new(cx);
+        h.cx.simulate_resize(size(px(900.), px(640.)));
+        h.cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        let scroll = h
+            .workspace
+            .read_with(&h.cx, |w, _| w.connections_scroll.clone());
+        let viewport = scroll.bounds();
+        let local = scroll
+            .bounds_for_item(0)
+            .expect("the local connection is rendered");
+        assert!(
+            viewport.size.height > px(0.),
+            "the default viewport must not collapse"
+        );
+        assert!(local.top() >= viewport.top() && local.bottom() <= viewport.bottom());
+
+        h.workspace.update(&mut h.cx, |w, cx| {
+            for index in 0..25 {
+                w.profiles.push(Profile::new(
+                    format!("connection-{index}"),
+                    format!("Connection {index}"),
+                    "fs:///tmp",
+                ));
+            }
+            cx.notify();
+        });
+        h.cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        let viewport = scroll.bounds();
+        assert!(viewport.size.height > px(0.));
+        assert!(
+            viewport.bottom() < px(640.),
+            "the list stays inside the sidebar"
+        );
+        assert!(scroll.max_offset().y > px(0.), "a long list must overflow");
+        h.cx.simulate_event(ScrollWheelEvent {
+            position: viewport.center(),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-10000.))),
+            ..Default::default()
+        });
+        h.cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert!(
+            scroll.offset().y < px(0.),
+            "the wheel must scroll connections"
+        );
+        let last = scroll.bounds_for_item(25).unwrap();
+        assert!(last.bottom() + scroll.offset().y <= viewport.bottom());
+        assert!(last.bottom() + scroll.offset().y > viewport.top());
+
+        h.workspace.update(&mut h.cx, |w, cx| {
+            w.profiles.clear();
+            w.connections_collapsed = true;
+            cx.notify();
+        });
+        h.cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        h.workspace.update(&mut h.cx, |w, cx| {
+            w.connections_collapsed = false;
+            cx.notify();
+        });
+        h.cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        let viewport = scroll.bounds();
+        let local = scroll.bounds_for_item(0).unwrap();
+        assert!(viewport.size.height > px(0.));
+        assert_eq!(scroll.offset().y, px(0.));
+        assert!(local.top() >= viewport.top() && local.bottom() <= viewport.bottom());
     }
 
     #[gpui_kit::test]
