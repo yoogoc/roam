@@ -10,9 +10,10 @@ use gpui_kit::component::{
     WindowExt, h_flex, v_flex,
 };
 use gpui_kit::{
-    AnyElement, App, AppContext, ClickEvent, Context, Entity, InteractiveElement, IntoElement,
-    MouseButton, ParentElement, Pixels, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, Window, div, prelude::FluentBuilder, px,
+    AnyElement, AnyView, AnyWindowHandle, App, AppContext, Bounds, ClickEvent, Context, Entity,
+    InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Render, ScrollHandle,
+    SharedString, StatefulInteractiveElement, Styled, Subscription, Window, WindowBounds,
+    WindowKind, WindowOptions, div, prelude::FluentBuilder, px, size,
 };
 use roam_core::transfer::DEFAULT_CONCURRENCY;
 use roam_core::{Error, Profile, ProfileId, ProfileStore, Rt, TransferEngine, Vfs};
@@ -63,6 +64,7 @@ pub struct Workspace {
     /// One engine for the whole app: transfers outlive the pane that started
     /// them and can span two sessions.
     transfers: Entity<TransferPanel>,
+    transfer_window: Option<AnyWindowHandle>,
     form: Option<Entity<ConnectionForm>>,
     shortcut_settings: ShortcutSettings,
     shortcut_settings_path: PathBuf,
@@ -83,7 +85,8 @@ impl Workspace {
         let close = workspace.downgrade();
         cx.on_action(move |_: &CloseTab, cx| {
             let close = close.clone();
-            let _ = window_handle.update(cx, move |_, window, cx| {
+            let target = cx.active_window().unwrap_or(window_handle);
+            let _ = target.update(cx, move |_, window, cx| {
                 let _ = close.update(cx, |workspace, cx| {
                     workspace.action_close_tab(&CloseTab, window, cx)
                 });
@@ -94,7 +97,8 @@ impl Workspace {
         let quit = workspace.downgrade();
         cx.on_action(move |_: &QuitApp, cx| {
             let quit = quit.clone();
-            let _ = window_handle.update(cx, move |_, window, cx| {
+            let target = cx.active_window().unwrap_or(window_handle);
+            let _ = target.update(cx, move |_, window, cx| {
                 let _ = quit.update(cx, |workspace, cx| {
                     workspace.action_quit_app(&QuitApp, window, cx)
                 });
@@ -125,7 +129,7 @@ impl Workspace {
                     return;
                 }
                 if close {
-                    workspace.confirm_close_tab(workspace.active, window, cx);
+                    workspace.action_close_tab(&CloseTab, window, cx);
                 } else {
                     workspace.confirm_quit(window, cx);
                 }
@@ -215,6 +219,7 @@ impl Workspace {
             next_tab_id: 1,
             tree,
             transfers,
+            transfer_window: None,
             form: None,
             shortcut_settings,
             shortcut_settings_path,
@@ -256,7 +261,7 @@ impl Workspace {
         // background tab finishing a listing cannot move the sidebar.
         let this = cx.weak_entity();
         let hidden = this.clone();
-        let panel = self.transfers.downgrade();
+        let transfers = cx.weak_entity();
         browser.update(cx, |browser, _| {
             browser.on_directory_changed(move |dir, cx| {
                 let _ = this.update(cx, |workspace, cx| {
@@ -268,8 +273,10 @@ impl Workspace {
                     workspace.tab_hidden_changed(id, show, cx);
                 });
             });
-            browser.on_transfers_queued(move |_, cx| {
-                let _ = panel.update(cx, |panel, cx| panel.refresh(cx));
+            browser.on_transfers_queued(move |window, cx| {
+                let _ = transfers.update(cx, |workspace, cx| {
+                    workspace.show_transfer_window(window, cx)
+                });
             });
         });
 
@@ -307,7 +314,14 @@ impl Workspace {
     }
 
     fn action_close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
-        self.confirm_close_tab(self.active, window, cx);
+        if self
+            .transfer_window
+            .is_some_and(|handle| handle.window_id() == window.window_handle().window_id())
+        {
+            window.remove_window();
+        } else {
+            self.confirm_close_tab(self.active, window, cx);
+        }
     }
 
     fn action_quit_app(&mut self, _: &QuitApp, window: &mut Window, cx: &mut Context<Self>) {
@@ -967,6 +981,39 @@ impl Workspace {
             .child(self.render_sidebar_footer(cx))
     }
 
+    fn show_transfer_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.transfers.update(cx, |panel, cx| panel.refresh(cx));
+        if let Some(handle) = self.transfer_window {
+            if handle
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+            self.transfer_window = None;
+        }
+        let panel = self.transfers.clone();
+        let display_id = window.display(cx).map(|display| display.id());
+        let bounds = Bounds::centered(display_id, size(px(760.), px(520.)), cx);
+        match cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size(px(640.), px(320.))),
+                display_id,
+                kind: WindowKind::Floating,
+                is_minimizable: false,
+                ..TitleBar::window_options()
+            },
+            move |window, cx| {
+                window.set_window_title("Roam · 传输任务");
+                cx.new(|cx| Root::new(AnyView::from(panel), window, cx))
+            },
+        ) {
+            Ok(handle) => self.transfer_window = Some(handle.into()),
+            Err(error) => window.push_notification(format!("无法打开传输窗口：{error}"), cx),
+        }
+    }
+
     fn render_sidebar_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let dark = cx.theme().mode.is_dark();
 
@@ -1007,6 +1054,16 @@ impl Workspace {
                             .tooltip("设置")
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.open_settings(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("open-transfers")
+                            .icon(IconName::ArrowDown)
+                            .ghost()
+                            .small()
+                            .tooltip("传输任务")
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.show_transfer_window(window, cx);
                             })),
                     ),
             )
@@ -1349,8 +1406,13 @@ impl Render for Workspace {
                                     }),
                             )
                             .child(self.render_capability_bar(cx))
-                            .child(div().flex_1().min_h_0().child(browser))
-                            .child(self.transfers.clone()),
+                            .child(
+                                div()
+                                    .debug_selector(|| "browser-content".into())
+                                    .flex_1()
+                                    .min_h_0()
+                                    .child(browser),
+                            ),
                     ),
             )
             // Root does not draw these itself; the app's root view has to.
@@ -1803,6 +1865,165 @@ pub(crate) mod tests {
         let err = h.workspace.read_with(&h.cx, |w, _| w.error.clone());
         assert!(err.is_none(), "first run should be quiet");
         assert!(!h.config_path.exists());
+    }
+
+    #[gpui_kit::test]
+    fn uploads_open_one_transfer_window_without_shrinking_the_browser(cx: &mut TestAppContext) {
+        use gpui_kit::{ExternalPaths, FileDropEvent};
+        use roam_core::TaskState;
+
+        let mut h = Harness::new(cx);
+        h.cx.simulate_resize(size(px(900.), px(640.)));
+        h.cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let before = h.cx.debug_bounds("browser-content").unwrap();
+        let position = h.cx.debug_bounds("browser-file-area").unwrap().center();
+        let source = tempfile::tempdir().unwrap();
+        let file = source.path().join("dropped.txt");
+        std::fs::write(&file, b"from finder").unwrap();
+
+        // Exercise the real platform drop, async planner, and workspace hook.
+        h.cx.simulate_event(FileDropEvent::Entered {
+            position,
+            paths: ExternalPaths([file].into_iter().collect()),
+        });
+        h.cx.simulate_event(FileDropEvent::Submit { position });
+        h.cx.simulate_event(FileDropEvent::Ended);
+        for _ in 0..400 {
+            h.cx.run_until_parked();
+            if h.workspace
+                .read_with(&h.cx, |w, _| w.transfer_window.is_some())
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let handle = h
+            .workspace
+            .read_with(&h.cx, |w, _| w.transfer_window.unwrap());
+        assert_eq!(h.cx.windows().len(), 2);
+        let mut transfer_cx = VisualTestContext::from_window(handle, cx);
+        transfer_cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let list = transfer_cx.debug_bounds("transfer-list").unwrap();
+        let row = transfer_cx.debug_bounds("transfer-row-1").unwrap();
+        assert!(
+            list.size.height > px(300.),
+            "the list uses the separate window's available height"
+        );
+        assert!(row.size.height > px(20.) && row.bottom() <= list.bottom());
+        h.cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(h.cx.debug_bounds("browser-content").unwrap(), before);
+
+        let workspace = h.workspace.clone();
+        h.cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.show_transfer_window(window, cx));
+        });
+        assert_eq!(
+            h.cx.windows().len(),
+            2,
+            "reuse the existing transfer window"
+        );
+        assert_eq!(
+            h.workspace
+                .read_with(&h.cx, |w, _| w.transfer_window.unwrap()),
+            handle
+        );
+
+        handle
+            .update(&mut h.cx, |_, window, _| window.remove_window())
+            .unwrap();
+        h.cx.run_until_parked();
+        assert_eq!(h.cx.windows().len(), 1);
+        let engine = h.workspace.read_with(&h.cx, |w, _| w.engine.clone());
+        for _ in 0..400 {
+            if !engine.is_active() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(engine.snapshot()[0].state, TaskState::Done);
+        assert_eq!(
+            std::fs::read(h._local_dir.path().join("dropped.txt")).unwrap(),
+            b"from finder"
+        );
+
+        h.cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.show_transfer_window(window, cx));
+        });
+        let reopened = h.workspace.read_with(&h.cx, |w, cx| {
+            assert!(
+                !w.transfers.read(cx).is_empty(),
+                "task history survives closing the window"
+            );
+            w.transfer_window.unwrap()
+        });
+        assert_ne!(reopened, handle);
+        assert_eq!(h.cx.windows().len(), 2);
+    }
+
+    #[gpui_kit::test]
+    fn transfer_window_shortcuts_target_that_window_and_keep_main_tabs(cx: &mut TestAppContext) {
+        use roam_core::TaskState;
+        use roam_core::transfer::Transfer;
+
+        let mut h = Harness::new(cx);
+        let workspace = h.workspace.clone();
+        let destination = tempfile::tempdir().unwrap();
+        h.cx.update(|window, cx| {
+            Workspace::register_global_actions(&workspace, window, cx);
+            workspace.update(cx, |w, cx| {
+                w.action_new_tab(&NewTab, window, cx);
+                // Queue a download to an isolated directory, then close the window
+                // immediately. Its lifetime must not control the shared engine.
+                w.engine.enqueue(Transfer::Download {
+                    vfs: w.local.clone(),
+                    remote: "local-only.txt".into(),
+                    local: destination.path().join("downloaded.txt"),
+                    size: Some(5),
+                });
+                w.show_transfer_window(window, cx);
+            });
+        });
+        let handle = h
+            .workspace
+            .read_with(&h.cx, |w, _| w.transfer_window.unwrap());
+        let mut transfer_cx = VisualTestContext::from_window(handle, cx);
+        transfer_cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        transfer_cx.simulate_keystrokes("cmd-q");
+        assert!(transfer_cx.update(|window, cx| window.has_active_dialog(cx)));
+        assert!(!h.cx.update(|window, cx| window.has_active_dialog(cx)));
+        transfer_cx.update(|window, cx| window.close_dialog(cx));
+        transfer_cx.simulate_keystrokes("cmd-w");
+        assert_eq!(h.cx.windows().len(), 1);
+        assert_eq!(
+            h.tab_count(),
+            2,
+            "closing the transfer window must preserve browser tabs"
+        );
+        let engine = h.workspace.read_with(&h.cx, |w, _| w.engine.clone());
+        for _ in 0..400 {
+            if !engine.is_active() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(engine.snapshot()[0].state, TaskState::Done);
+        assert_eq!(
+            std::fs::read(destination.path().join("downloaded.txt")).unwrap(),
+            b"local"
+        );
+        h.cx.simulate_keystrokes("cmd-w");
+        assert!(
+            h.cx.update(|window, cx| window.has_active_dialog(cx)),
+            "main window keeps its tab close confirmation"
+        );
     }
 
     /// The buttons live at the bottom of the popup, so a dialog that does not

@@ -3,10 +3,14 @@ use std::time::Duration;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::progress::Progress;
 use gpui_kit::component::scroll::ScrollableElement;
-use gpui_kit::component::{ActiveTheme, Disableable, Icon, IconName, Sizable, h_flex, v_flex};
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{
+    ActiveTheme, Disableable, Icon, IconName, Root, Sizable, TitleBar, h_flex, v_flex,
+};
 use gpui_kit::{
-    ClickEvent, Context, IntoElement, ParentElement, Render, SharedString, Styled, Task, Window,
-    div, prelude::FluentBuilder, px,
+    ClickEvent, Context, InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle,
+    SharedString, StatefulInteractiveElement, Styled, Task, Window, div, prelude::FluentBuilder,
+    px,
 };
 use roam_core::transfer::{TaskSnapshot, TaskState, TransferOverview};
 use roam_core::{TransferEngine, fmt};
@@ -23,7 +27,7 @@ const POLL: Duration = Duration::from_millis(100);
 /// asked to describe the rest.
 const VISIBLE_ROWS: usize = 50;
 
-/// The bottom transfer panel: one row per task, with progress and a cancel.
+/// The independent transfer window content, with progress and task controls.
 pub struct TransferPanel {
     engine: TransferEngine,
     /// Counts over every task plus the newest [`VISIBLE_ROWS`]. Polled at 10 Hz
@@ -33,7 +37,7 @@ pub struct TransferPanel {
     overview: TransferOverview,
     /// Held so the poll stops when the panel goes away.
     poll: Option<Task<()>>,
-    expanded: bool,
+    scroll: ScrollHandle,
 }
 
 impl TransferPanel {
@@ -47,7 +51,7 @@ impl TransferPanel {
                 recent: Vec::new(),
             },
             poll: None,
-            expanded: true,
+            scroll: ScrollHandle::default(),
         }
     }
 
@@ -107,27 +111,14 @@ impl TransferPanel {
         let failed = self.failed_count();
 
         h_flex()
+            .flex_none()
             .px_3()
-            .py_1p5()
+            .py_2()
             .gap_2()
             .items_center()
-            .border_t_1()
+            .border_b_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().secondary)
-            .child(
-                Button::new("toggle-transfers")
-                    .icon(if self.expanded {
-                        IconName::ChevronDown
-                    } else {
-                        IconName::ChevronUp
-                    })
-                    .ghost()
-                    .xsmall()
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.expanded = !this.expanded;
-                        cx.notify();
-                    })),
-            )
             .child(div().text_sm().child(SharedString::from(format!(
                 "传输 · {} 项",
                 self.overview.total
@@ -136,7 +127,7 @@ impl TransferPanel {
                 el.child(
                     div()
                         .text_xs()
-                        .text_color(cx.theme().accent_foreground)
+                        .text_color(cx.theme().foreground)
                         .child(SharedString::from(format!("{active} 进行中"))),
                 )
             })
@@ -201,11 +192,14 @@ impl TransferPanel {
             (None, _) => fmt::size(Some(task.done)),
         };
 
+        let detail_tooltip = detail.clone();
         let speed = task
             .bytes_per_sec
             .map(|rate| format!("{}/s", fmt::size(Some(rate))));
 
         h_flex()
+            .debug_selector(move || format!("transfer-row-{id}"))
+            .flex_none()
             .px_3()
             .py_1p5()
             .gap_3()
@@ -228,9 +222,10 @@ impl TransferPanel {
                     .flex_1()
                     .min_w_0()
                     .gap_1()
-                    .child(div().text_sm().child(task.label.to_string()))
+                    .child(div().text_sm().truncate().child(task.label.to_string()))
                     .child(
                         h_flex()
+                            .min_w_0()
                             .gap_2()
                             .text_xs()
                             .text_color(if matches!(task.state, TaskState::Failed(_)) {
@@ -238,9 +233,18 @@ impl TransferPanel {
                             } else {
                                 cx.theme().muted_foreground
                             })
-                            .child(task.state.label())
-                            .child(detail)
-                            .when_some(speed, |el, speed| el.child(speed)),
+                            .child(div().flex_none().child(task.state.label()))
+                            .child(
+                                div()
+                                    .id(("task-detail", id as usize))
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(detail)
+                                    .tooltip(move |window, cx| {
+                                        Tooltip::new(detail_tooltip.clone()).build(window, cx)
+                                    }),
+                            )
+                            .when_some(speed, |el, speed| el.child(div().flex_none().child(speed))),
                     ),
             )
             .child(
@@ -292,32 +296,75 @@ impl TransferPanel {
 }
 
 impl Render for TransferPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Nothing queued yet: stay out of the way entirely.
-        if self.overview.total == 0 {
-            return div().into_any_element();
-        }
-
-        // Already newest-first and already capped by the engine.
-        let rows: Vec<_> = self
-            .overview
-            .recent
-            .iter()
-            .map(|task| self.render_task(task, cx).into_any_element())
-            .collect();
-
-        v_flex()
-            .flex_none()
-            .bg(cx.theme().background)
-            .child(self.render_header(cx))
-            .when(self.expanded, |el| {
-                el.child(
-                    v_flex()
-                        .max_h(px(220.))
-                        .overflow_y_scrollbar()
-                        .children(rows),
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let content = if self.is_empty() {
+            v_flex()
+                .flex_1()
+                .min_h_0()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .child(
+                    Icon::new(IconName::ArrowDown)
+                        .size_8()
+                        .text_color(cx.theme().muted_foreground),
                 )
-            })
-            .into_any_element()
+                .child(div().text_sm().child("暂无传输任务"))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("上传或下载文件后，进度会显示在这里。"),
+                )
+                .into_any_element()
+        } else {
+            let rows: Vec<_> = self
+                .overview
+                .recent
+                .iter()
+                .map(|task| self.render_task(task, cx).into_any_element())
+                .collect();
+            v_flex()
+                .id("transfer-tasks")
+                .debug_selector(|| "transfer-list".into())
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll)
+                .children(rows)
+                .vertical_scrollbar(&self.scroll)
+                .into_any_element()
+        };
+        let note = if self.overview.total > self.overview.recent.len() {
+            format!(
+                "显示最近 {} 项任务 · 关闭窗口后传输继续",
+                self.overview.recent.len()
+            )
+        } else {
+            "关闭窗口后传输继续，可从主窗口左下角重新打开。".into()
+        };
+        v_flex()
+            .relative()
+            .size_full()
+            .min_h_0()
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
+            .child(TitleBar::new().child(div().text_sm().child("Roam · 传输任务")))
+            .child(self.render_header(cx))
+            .child(content)
+            .child(
+                div()
+                    .flex_none()
+                    .px_3()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(note),
+            )
+            .children(Root::render_dialog_layer(window, cx))
+            .children(Root::render_notification_layer(window, cx))
     }
 }

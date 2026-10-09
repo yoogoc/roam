@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use gpui_kit::component::Root;
+use gpui_kit::component::{Root, TitleBar};
 use gpui_kit::{AnyView, App, AppContext, Bounds, Window, WindowBounds, WindowOptions, px, size};
 use roam_core::transfer::{DEFAULT_CONCURRENCY, Transfer};
 use roam_core::{Rt, TransferEngine, Vfs};
@@ -56,12 +56,12 @@ fn main() {
             // Installs the keyboard bindings; without it every shortcut is inert.
             roam_ui::init(cx);
 
-            let bounds = Bounds::centered(None, size(px(760.), px(420.)), cx);
+            let bounds = Bounds::centered(None, size(px(760.), px(520.)), cx);
 
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    ..Default::default()
+                    ..TitleBar::window_options()
                 },
                 move |window: &mut Window, cx| {
                     let panel = cx.new(|cx| {

@@ -23,11 +23,17 @@ server can stay open side by side while Roam transfers data between them.
 | | |
 | --- | --- |
 | **Browse at scale** | Virtualized tables, streamed listings, filtering, sorting, hidden-file controls, and a lazily loaded directory tree. |
-| **Work across storage** | Multiple independent tabs and cross-backend copy, upload, download, move, progress, cancellation, and resumable downloads. |
+| **Work across storage** | Multiple independent tabs and cross-backend copy, upload, download, move, progress in a separate transfer window, cancellation, and resumable downloads. |
 | **Use familiar file tools** | Create folders, rename, duplicate, delete with confirmation, drag files in from Finder, and inspect capability-aware context menus. |
 | **Preview before opening** | DuckDB data grids, PDF pages, Office content, structured text, images, archive trees, audio controls, and video thumbnails, with bounded reads for remote storage. |
 | **Stay in control** | Light and dark themes, collapsible sidebar sections, editable keyboard shortcuts, and confirmation before closing a tab or quitting. |
 | **Inspect object history** | Browse, preview, download, and restore object versions when the backend exposes versioning. |
+
+Uploads and downloads automatically open a separate **Transfer tasks** window.
+The browser keeps its full content area. Closing the transfer window leaves
+transfers running; use the transfer button at the bottom of the sidebar to
+reopen it. Progress, speed, cancellation, retries and completed-task cleanup
+are available in that window.
 
 ## Supported storage
 

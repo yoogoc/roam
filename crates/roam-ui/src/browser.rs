@@ -872,19 +872,19 @@ impl Browser {
         let handle = window.window_handle();
 
         cx.spawn(async move |_, cx| {
-            let message = match plan.await {
-                Ok(transfers) if transfers.is_empty() => format!("没有可{what}的文件"),
+            let (message, queued) = match plan.await {
+                Ok(transfers) if transfers.is_empty() => (format!("没有可{what}的文件"), false),
                 Ok(transfers) => {
                     let count = transfers.len();
                     engine.enqueue_all(transfers);
-                    format!("已加入 {count} 个{what}任务")
+                    (format!("已加入 {count} 个{what}任务"), true)
                 }
-                Err(err) => err.full_message(),
+                Err(err) => (err.full_message(), false),
             };
 
             let _ = handle.update(cx, |_, window, cx| {
                 window.push_notification(message, cx);
-                if let Some(notify) = notify.as_ref() {
+                if queued && let Some(notify) = notify.as_ref() {
                     notify(window, cx);
                 }
             });
@@ -1299,6 +1299,7 @@ impl Render for Browser {
                         // content, which is what lets the table virtualize
                         // instead of growing.
                         div()
+                            .debug_selector(|| "browser-file-area".into())
                             .flex_1()
                             .min_w_0()
                             .h_full()
@@ -1849,6 +1850,25 @@ pub(crate) mod tests {
 
         h.settle();
         assert_eq!(h.names(), vec!["reports", "contract.pdf"]);
+    }
+    #[gpui_kit::test]
+    fn empty_and_failed_transfer_plans_do_not_open_a_transfer_window(cx: &mut TestAppContext) {
+        let mut h = Harness::new(cx);
+        let notified = Rc::new(std::cell::Cell::new(false));
+        let observer = notified.clone();
+        let browser = h.browser.clone();
+        h.cx.update(|window, cx| {
+            browser.update(cx, |browser, cx| {
+                browser.on_transfers_queued(move |_, _| observer.set(true));
+                browser.plan_and_queue("上传", window, cx, async { Ok(Vec::new()) });
+                browser.plan_and_queue("下载", window, cx, async {
+                    Err(Error::Config("cannot plan".into()))
+                });
+            });
+        });
+        h.cx.run_until_parked();
+        assert!(!notified.get());
+        assert!(h.transfer_snapshot().is_empty());
     }
 }
 
