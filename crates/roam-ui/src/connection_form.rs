@@ -28,6 +28,7 @@ use roam_core::service::{self, Field, FieldKind, Service};
 use roam_core::{Profile, ProfileId, Result, SharePointAuthMethod, profile};
 
 use crate::placeholders;
+use crate::service_icon::ServiceIcon;
 
 /// One rendered field, holding whichever kind of state it needs.
 struct FieldInput {
@@ -523,17 +524,17 @@ impl ConnectionForm {
 }
 
 /// Display copy stays in the UI; the core service schema still owns all fields.
-fn service_presentation(service: &Service) -> (&str, &str, IconName) {
+fn service_presentation(service: &Service) -> (&str, &str) {
     match service.scheme {
-        "fs" => ("本机磁盘", "本地文件夹", IconName::FolderClosed),
-        "s3" => ("S3", "兼容对象存储", IconName::Inbox),
-        "gcs" => ("Google Cloud", "Cloud Storage", IconName::Globe),
-        "azblob" => ("Azure Blob", "Microsoft Azure", IconName::Building2),
-        "webdav" => ("WebDAV", "远程文件服务", IconName::Globe),
-        "sftp" => ("SFTP", "SSH · 用户名与密码", IconName::Globe),
-        "nfs" => ("NFS", "网络共享 · v3", IconName::FolderClosed),
-        "sharepoint" => ("SharePoint", "Microsoft 365 文档库", IconName::Building2),
-        _ => (service.label, "", IconName::Globe),
+        "fs" => ("本机磁盘", "本地文件夹"),
+        "s3" => ("S3", "兼容对象存储"),
+        "gcs" => ("Google Cloud", "Cloud Storage"),
+        "azblob" => ("Azure Blob", "Microsoft Azure"),
+        "webdav" => ("WebDAV", "远程文件服务"),
+        "sftp" => ("SFTP", "SSH · 用户名与密码"),
+        "nfs" => ("NFS", "网络共享 · v3"),
+        "sharepoint" => ("SharePoint", "Microsoft 365 文档库"),
+        _ => (service.label, ""),
     }
 }
 
@@ -577,7 +578,7 @@ impl Render for ConnectionForm {
         for service in service::SERVICES {
             let target = service.scheme;
             let selected = target == self.scheme;
-            let (label, detail, icon) = service_presentation(service);
+            let (label, detail) = service_presentation(service);
             buttons.push(
                 Button::new(SharedString::from(format!("svc-{target}")))
                     .ghost()
@@ -595,7 +596,7 @@ impl Render for ConnectionForm {
                             } else {
                                 cx.theme().muted_foreground
                             })
-                            .child(Icon::new(icon).size_4().flex_shrink_0())
+                            .child(ServiceIcon::for_scheme(target).render())
                             .child(
                                 v_flex()
                                     .flex_1()

@@ -6,7 +6,7 @@ use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
-    ActiveTheme, Disableable, Icon, IconName, Root, Sizable, StyledExt, Theme, ThemeMode, TitleBar,
+    ActiveTheme, Disableable, IconName, Root, Sizable, StyledExt, Theme, ThemeMode, TitleBar,
     WindowExt, h_flex, v_flex,
 };
 use gpui_kit::{
@@ -25,6 +25,7 @@ use crate::browser::Browser;
 use crate::connection_form::ConnectionForm;
 use crate::dialog::DialogButtons;
 use crate::dir_tree::DirTreeView;
+use crate::service_icon::ServiceIcon;
 use crate::shortcut_settings::ShortcutSettingsForm;
 use crate::transfer_panel::TransferPanel;
 
@@ -1148,15 +1149,7 @@ impl Workspace {
                     this.connect(id_owned.clone(), window, cx);
                 }
             }))
-            .child(
-                Icon::new(if scheme == "fs" {
-                    IconName::FolderClosed
-                } else {
-                    IconName::Globe
-                })
-                .size_4()
-                .flex_none(),
-            )
+            .child(ServiceIcon::for_scheme(scheme).render())
             .child(
                 v_flex()
                     .flex_1()

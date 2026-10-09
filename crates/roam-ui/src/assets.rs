@@ -14,13 +14,68 @@
 //! background — which is how the bug was originally reported: "the button only
 //! appears when the mouse passes over it".
 //!
-//! The icons used to be vendored here, 86 of them, because the published
-//! gpui-component shipped none. GPUI Kit supplies the matching icon set through
-//! `gpui_kit::assets`, so this is a re-export — but the tests stay.
+//! GPUI Kit supplies component icons; Roam additionally embeds service logos
+//! and the three protocol symbols used by its connection views.
 //! Nothing checking was the reason the icons went missing in the first place, and
 //! that is just as true of someone else's asset crate as of our own.
 
-pub use gpui_kit::assets::Assets;
+use std::borrow::Cow;
+
+use gpui_kit::{AssetSource, Result, SharedString};
+
+gpui_kit::assets::icon_assets!(ProtocolAssets, [HardDrive, FolderLock, Network]);
+
+const SERVICE_ASSETS: &[(&str, &[u8])] = &[
+    (
+        "services/amazon-s3.svg",
+        include_bytes!("../assets/services/amazon-s3.svg"),
+    ),
+    (
+        "services/google-cloud-storage.svg",
+        include_bytes!("../assets/services/google-cloud-storage.svg"),
+    ),
+    (
+        "services/azure-storage.svg",
+        include_bytes!("../assets/services/azure-storage.svg"),
+    ),
+    (
+        "services/sharepoint.svg",
+        include_bytes!("../assets/services/sharepoint.svg"),
+    ),
+    (
+        "services/webdav.jpg",
+        include_bytes!("../assets/services/webdav.jpg"),
+    ),
+];
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Assets;
+
+impl AssetSource for Assets {
+    fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if let Some((_, bytes)) = SERVICE_ASSETS.iter().find(|(name, _)| *name == path) {
+            return Ok(Some(Cow::Borrowed(bytes)));
+        }
+        if let Some(bytes) = ProtocolAssets.load(path)? {
+            return Ok(Some(bytes));
+        }
+        gpui_kit::assets::Assets.load(path)
+    }
+
+    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        let mut paths = gpui_kit::assets::Assets.list(path)?;
+        paths.extend(ProtocolAssets.list(path)?);
+        paths.extend(
+            SERVICE_ASSETS
+                .iter()
+                .filter(|(name, _)| name.starts_with(path))
+                .map(|(name, _)| (*name).into()),
+        );
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -46,6 +101,7 @@ mod tests {
             include_str!("dir_tree.rs"),
             include_str!("name_dialog.rs"),
             include_str!("preview.rs"),
+            include_str!("service_icon.rs"),
             include_str!("transfer_panel.rs"),
             include_str!("workspace.rs"),
         ];
@@ -123,6 +179,47 @@ mod tests {
             Assets.load("icons/not-a-real-icon.svg").is_err(),
             "a missing icon must not resolve quietly"
         );
+    }
+
+    /// Exercise the colour image decoder used by `img`, including WebDAV's
+    /// JPEG. Loading an SVG through `Icon` would lose these RGB channels.
+    #[gpui_kit::test]
+    fn service_logos_decode_to_visible_colour_images(cx: &mut gpui_kit::TestAppContext) {
+        use crate::service_icon::ServiceIcon;
+        use gpui_kit::{Image, ImageFormat};
+
+        let renderer = cx.update(|cx| cx.svg_renderer());
+        let listed = Assets.list("services/").unwrap();
+        for service in roam_core::service::SERVICES {
+            let ServiceIcon::Logo(path) = ServiceIcon::for_scheme(service.scheme) else {
+                continue;
+            };
+            assert!(listed.iter().any(|name| name.as_ref() == path));
+            let bytes = Assets.load(path).unwrap().expect("bundled service logo");
+            let format = if path.ends_with(".svg") {
+                ImageFormat::Svg
+            } else {
+                ImageFormat::Jpeg
+            };
+            let image = Image::from_bytes(format, bytes.into_owned())
+                .to_image_data(renderer.clone())
+                .unwrap_or_else(|error| panic!("{path} cannot be displayed: {error}"));
+            let pixels = image.as_bytes(0).unwrap();
+            assert!(
+                pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|pixel| pixel[3] > 0 && (pixel[0] != pixel[1] || pixel[1] != pixel[2])),
+                "{path} lost its official colours"
+            );
+            if format == ImageFormat::Svg {
+                assert!(
+                    image.size(0).width.0 >= 256,
+                    "{path} must remain sharp on high-density displays"
+                );
+            }
+        }
     }
 
     /// Resolving a path is not the same as drawing something. gpui rasterises an

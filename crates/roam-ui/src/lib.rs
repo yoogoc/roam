@@ -14,6 +14,7 @@ mod name_dialog;
 pub mod placeholders;
 mod preview;
 mod preview_audio;
+mod service_icon;
 mod shortcut_settings;
 mod transfer_panel;
 mod workspace;
