@@ -12,8 +12,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     AppContext, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, InteractiveElement,
-    IntoElement, ParentElement, Render, SharedString, Styled, Subscription, Task, Window, div,
-    prelude::FluentBuilder, px,
+    IntoElement, ParentElement, PathPromptOptions, Render, SharedString, Styled, Subscription,
+    Task, Window, div, prelude::FluentBuilder, px,
 };
 use roam_core::transfer::{
     Transfer, plan_download, plan_duplicate_dir, plan_move_dir, plan_upload,
@@ -813,16 +813,38 @@ impl Browser {
         });
     }
 
-    fn download(&mut self, entry: DirEntry, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(dest) = roam_core::dirs::downloads() else {
-            window.push_notification("找不到下载目录", cx);
-            return;
-        };
-
+    fn download(&mut self, entry: DirEntry, _: &mut Window, cx: &mut Context<Self>) {
+        // Capture the source before opening the picker: navigation or a session
+        // change must not pair the selected entry with a different backend.
         let vfs = self.vfs.clone();
-        self.plan_and_queue("下载", window, cx, async move {
-            plan_download(&vfs, &entry, &dest).await
+        let picker = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("选择下载文件夹".into()),
         });
+        cx.spawn(async move |this, cx| {
+            match picker.await {
+                Ok(Ok(Some(paths))) => {
+                    let Some(dest) = paths.into_iter().next() else {
+                        return;
+                    };
+                    let _ = this.update_in(cx, |browser, window, cx| {
+                        browser.plan_and_queue("下载", window, cx, async move {
+                            plan_download(&vfs, &entry, &dest).await
+                        });
+                    });
+                }
+                Ok(Err(error)) => {
+                    let _ = this.update_in(cx, |_, window, cx| {
+                        window.push_notification(format!("无法选择下载文件夹：{error}"), cx);
+                    });
+                }
+                // Cancelling the picker or closing its receiver queues nothing.
+                Ok(Ok(None)) | Err(_) => {}
+            }
+        })
+        .detach();
     }
 
     /// Upload paths dropped from the Finder into the current directory.
@@ -1544,6 +1566,27 @@ pub(crate) mod tests {
             });
         }
 
+        pub(crate) fn choose_download_folder(&mut self, destination: &std::path::Path) {
+            assert!(
+                self.cx.did_prompt_for_paths(),
+                "download must ask for a destination"
+            );
+            let destination = destination.to_path_buf();
+            self.cx.simulate_path_prompt_response(move |options| {
+                assert!(!options.files, "only directories can be chosen");
+                assert!(options.directories);
+                assert!(!options.multiple);
+                Some(vec![destination])
+            });
+            self.cx.run_until_parked();
+        }
+
+        pub(crate) fn cancel_download_folder(&mut self) {
+            assert!(self.cx.did_prompt_for_paths());
+            self.cx.simulate_path_prompt_response(|_| None);
+            self.cx.run_until_parked();
+        }
+
         pub(crate) fn drop_files(&mut self, paths: Vec<std::path::PathBuf>) {
             let browser = self.browser.clone();
             self.cx.update(|window, cx| {
@@ -2087,17 +2130,71 @@ mod mutation_tests {
     }
 
     #[gpui_kit::test]
-    fn downloading_a_file_queues_a_transfer(cx: &mut TestAppContext) {
+    fn downloading_a_file_waits_for_a_folder_and_saves_into_it(cx: &mut TestAppContext) {
         use roam_core::TaskState;
 
         let mut h = Harness::new(cx);
+        let destination = tempfile::tempdir().unwrap();
         h.download("README.md");
+        assert!(
+            h.transfer_snapshot().is_empty(),
+            "do not start before a folder is selected"
+        );
+        h.choose_download_folder(destination.path());
         h.settle_transfers();
 
         let tasks = h.transfer_snapshot();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].state, TaskState::Done);
         assert_eq!(&*tasks[0].label, "README.md");
+        assert_eq!(
+            std::fs::read(destination.path().join("README.md")).unwrap(),
+            b"# readme"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn downloading_a_folder_with_the_shortcut_preserves_its_tree_in_the_chosen_folder(
+        cx: &mut TestAppContext,
+    ) {
+        let mut h = Harness::new(cx);
+        let destination = tempfile::tempdir().unwrap();
+        let output = destination.path().join("下载 目录");
+        std::fs::create_dir(&output).unwrap();
+        h.select_row("documents");
+        h.focus_list();
+        h.keystroke("cmd-d");
+        assert!(h.transfer_snapshot().is_empty());
+        h.choose_download_folder(&output);
+        h.settle_transfers();
+        assert_eq!(
+            std::fs::read(output.join("documents/contract.pdf")).unwrap(),
+            b"pdf"
+        );
+        assert_eq!(
+            std::fs::read(output.join("documents/reports/q1.xlsx")).unwrap(),
+            b"xlsx"
+        );
+        assert!(h.path().join("documents/reports/q1.xlsx").exists());
+    }
+
+    #[gpui_kit::test]
+    fn cancelling_the_download_folder_picker_queues_nothing(cx: &mut TestAppContext) {
+        let mut h = Harness::new(cx);
+        h.download("README.md");
+        h.cancel_download_folder();
+        assert!(h.transfer_snapshot().is_empty());
+        // Cancellation must not leave the next download blocked or reuse a
+        // previously cancelled destination.
+        let destination = tempfile::tempdir().unwrap();
+        h.download("notes.txt");
+        h.choose_download_folder(destination.path());
+        h.settle_transfers();
+        assert_eq!(h.transfer_snapshot().len(), 1);
+        assert_eq!(
+            std::fs::read(destination.path().join("notes.txt")).unwrap(),
+            b"note"
+        );
     }
 
     #[gpui_kit::test]

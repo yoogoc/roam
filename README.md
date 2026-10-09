@@ -29,6 +29,10 @@ server can stay open side by side while Roam transfers data between them.
 | **Stay in control** | Light and dark themes, collapsible sidebar sections, editable keyboard shortcuts, and confirmation before closing a tab or quitting. |
 | **Inspect object history** | Browse, preview, download, and restore object versions when the backend exposes versioning. |
 
+Downloads first open a system folder picker, letting you choose where to save
+the selected file or folder. Folder downloads preserve their directory tree;
+cancelling the picker starts no transfer.
+
 Uploads and downloads automatically open a separate **Transfer tasks** window.
 The browser keeps its full content area. Closing the transfer window leaves
 transfers running; use the transfer button at the bottom of the sidebar to
