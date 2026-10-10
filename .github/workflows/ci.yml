@@ -88,9 +88,16 @@ jobs:
   # from the fast Linux job.
   ui:
     name: ui (macos)
-    runs-on: macos-latest
+    runs-on: xcode-27
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
     steps:
       - uses: actions/checkout@v4
+      - name: Select macOS SDK 27.0
+        run: |
+          xcodebuild -version
+          test "$(xcrun --sdk macosx27.0 --show-sdk-version)" = "27.0"
+          echo "SDKROOT=$(xcrun --sdk macosx27.0 --show-sdk-path)" >> "$GITHUB_ENV"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -106,6 +113,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
+          key: macos-sdk27.0
           workspaces: . -> target
 
       - name: Clippy

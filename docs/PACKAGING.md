@@ -106,8 +106,8 @@ Debian 开发版使用 `~dev.N`，保证它排在对应正式版之前。
 
 | 矩阵项 | runner | 格式 | 本机验证到哪 |
 | --- | --- | --- | --- |
-| macos-arm64 | `macos-15` | app, dmg | 打包+签名+启动，反复跑过 |
-| macos-amd64 | `macos-15` 上交叉编译 | app, dmg | 打包跑通，产出 x86_64 的 `Roam_0.1.0_x64.dmg` |
+| macos-arm64 | `xcode-27` | app, dmg | 打包+签名+启动，反复跑过 |
+| macos-amd64 | `xcode-27` 上交叉编译 | app, dmg | 打包跑通，产出 x86_64 的 DMG |
 | linux-amd64 | `ubuntu-24.04` | deb, appimage | 见下（容器验的是 arm64，amd64 属推断） |
 | linux-arm64 | `ubuntu-24.04-arm` | deb, appimage | **`.deb` 已打成**；AppImage 见下 |
 | windows-amd64 | `windows-2022` | nsis | **完全没验过**（没有 Windows 机器） |
@@ -116,6 +116,10 @@ Debian 开发版使用 `~dev.N`，保证它排在对应正式版之前。
 Intel mac 用**交叉编译**而不是申请 Intel runner：macOS SDK 两个架构都能出，而 Intel
 runner 正在退役。本机实测过这条路 —— 产物落在 `target/x86_64-apple-darwin/release/`，
 所以工作流里的上传路径统一用 triple 目录。
+
+macOS 发布任务与 UI 检查均使用 `xcode-27` runner，显式选择 Xcode 27.0 和
+macOS SDK 27.0，并将 SDK 路径传给构建工具。构建缓存包含 SDK 版本，避免复用
+旧 SDK 的产物。此设置指定构建 SDK，应用最低系统版本仍由打包配置管理。
 
 CI 先用矩阵里的 target 显式执行
 `cargo build --release -p roam --target <triple>`，再把同一个 target 传给 cargo-packager。
