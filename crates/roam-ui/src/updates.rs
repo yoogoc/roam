@@ -85,6 +85,15 @@ pub fn init(rt: Rt, directory: PathBuf, cx: &mut App) {
         _prepared: None,
     });
     cx.set_global(SharedUpdater(updater.clone()));
+    // Start after window setup; the request itself runs on Tokio.
+    let startup = updater.clone();
+    cx.defer(move |cx| {
+        startup.update(cx, |view, cx| {
+            if view.preferences.auto_check {
+                view.check(cx);
+            }
+        });
+    });
     updater.update(cx, |view, cx| {
         let reading = view.rt.handle().spawn(async move {
             tokio::task::spawn_blocking(move || roam_updater::read_install_result(&cache))
@@ -102,10 +111,10 @@ pub fn init(rt: Rt, directory: PathBuf, cx: &mut App) {
         })
         .detach();
         view.timer = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_secs(15))
-                .await;
             loop {
+                cx.background_executor()
+                    .timer(Duration::from_secs(24 * 60 * 60))
+                    .await;
                 if this
                     .update(cx, |view, cx| {
                         if view.preferences.auto_check
@@ -121,9 +130,6 @@ pub fn init(rt: Rt, directory: PathBuf, cx: &mut App) {
                 {
                     break;
                 }
-                cx.background_executor()
-                    .timer(Duration::from_secs(24 * 60 * 60))
-                    .await;
             }
         }));
     });
@@ -510,7 +516,7 @@ impl Render for Updater {
                         }))
                 }))))
             .child(div().text_xs().text_color(cx.theme().muted_foreground)
-                .child("启动 15 秒后检查，此后每 24 小时检查一次。开发渠道包含预发布版本，更新不会降级。"))
+                .child("启动后立即检查一次，此后每 24 小时检查一次。开发渠道包含预发布版本，更新不会降级。"))
             .when(!can_install, |el| el.child(div().text_xs().text_color(cx.theme().muted_foreground)
                 .child("当前为源码、便携或包管理器安装，请通过发布页面下载，或使用系统包管理器更新。")))
             .child(div().text_sm().text_color(if matches!(self.status, Status::Failed { .. }) { cx.theme().danger } else { cx.theme().foreground }).child(message.clone()))

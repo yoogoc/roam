@@ -83,19 +83,19 @@ env -u all_proxy -u ALL_PROXY cargo packager -p roam --release --formats dmg
 里**没有 LICENSE 文件**。配置里因此没有 `license-file`；要发布的话这个得补上（涉及版权
 署名，留给你定）。
 
-## CI：push 时自动打包并发布
+## CI：按版本标签或手动打包
 
 `.github/workflows/package.yml`，矩阵是 mac / windows / linux × amd64 / arm64。
 
-触发限定在 **push 到 main、push `vX.Y.Z` tag、以及手动 dispatch**。共享 CI
+触发限定在 **push `vX.Y.Z` tag、以及手动 dispatch**。`main` 推送只运行普通 CI
+检查，不自动打包或发布。共享 CI
 通过后才构建安装包，包和更新清单全部验签成功后上传到草稿 Release，再统一发布。
 
-- `main`：生成 `X.Y.Z-dev.<GITHUB_RUN_NUMBER>` 开发版，每次运行版本号递增，
-  不标记为 latest。如果 Cargo 当前是正式版本，自动使用下一个 patch 作为开发目标。
-  例如 `0.1.0` 的 main 推送会生成 `0.1.1-dev.123`。
 - `vX.Y.Z`：版本必须与 Cargo 一致，发布正式版并标记为 latest；六个平台都必须
   构建成功。先运行 `python3 scripts/release.py set X.Y.Z`，提交版本变更后创建标签。
-- 手动 dispatch：生成开发版本的 Actions artifact，不发布 Release 或更新清单。
+- 手动 dispatch：生成 `X.Y.Z-dev.<GITHUB_RUN_NUMBER>` 开发版本的 Actions artifact，
+  不发布 Release 或更新清单。Cargo 当前是正式版时，自动使用下一个 patch 作为开发
+  目标，例如 `0.1.0` 的手动构建会生成 `0.1.1-dev.123`。
 - 已发布的版本不可覆盖，重跑失败的草稿可以继续上传。
 
 `scripts/release.py` 同时修改 workspace 版本与 Cargo.lock 中本地包版本，不更新
@@ -195,10 +195,12 @@ AppImage 的工具链在两个架构下都齐：`AppRun-{x86_64,aarch64}`、
 ## 自动更新
 
 更新实现参考 Beacon，放在独立的 `roam-updater` crate；网络操作运行在 Tokio，
-设置页与主窗口共享更新状态。默认在启动 15 秒后检查，此后每 24 小时检查；默认不
+设置页与主窗口共享更新状态。默认在启动后立即检查一次，此后每 24 小时检查；默认不
 自动下载。开发版默认选择开发渠道，正式版默认选择稳定渠道，用户选择保存在
 与 profiles.toml 同目录的 `updates.toml`。下载缓存位于同目录的 `updates/`。
-网络使用系统/环境代理配置。更新只选择高于当前版本的发布，跳过草稿，稳定渠道
+更新请求默认读取 macOS/Windows 的系统代理设置，也支持 `HTTP_PROXY`、
+`HTTPS_PROXY`、`ALL_PROXY` 等环境变量；Linux 使用环境代理配置。更新只选择
+高于当前版本的发布，跳过草稿，稳定渠道
 还会过滤预发布版本。
 
 设置 → 应用更新提供渠道切换、自动检查/下载、手动检查、下载取消、进度、失败重试、
@@ -241,9 +243,8 @@ cargo packager signer generate --path /secure/location/roam-update.key
 gh secret set ROAM_UPDATE_PRIVATE_KEY --repo yoogoc/roam < /secure/location/roam-update.key
 ```
 
-发布缺少私钥时会在构建前报错，使用不匹配私钥则在验签阶段失败。开发版允许缺少
-失败的未验证平台，更新客户端会明确提示相应平台没有可用更新包。正式版要求全部
-平台完整。这里的更新签名与 Apple Developer ID / 公证及 Windows 代码签名是不同
+发布缺少私钥时会在构建前报错，使用不匹配私钥则在验签阶段失败。手动开发构建允许
+未验证平台失败，但不会发布更新清单；正式版要求全部平台完整。这里的更新签名与 Apple Developer ID / 公证及 Windows 代码签名是不同
 机制，仍需按前文配置操作系统的分发签名。
 
 参考：[cargo-packager 更新签名](https://docs.crabnebula.dev/packager/updater/)、
