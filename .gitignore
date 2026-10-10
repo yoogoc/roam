@@ -11,3 +11,8 @@
 # The real one lives in the platform config dir, but ROAM_CONFIG makes it easy to
 # point at the working tree while testing — so it must never be committable.
 profiles.toml
+
+# Python release tools and local update signing material.
+__pycache__/
+*.pyc
+*.key

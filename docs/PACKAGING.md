@@ -87,11 +87,20 @@ env -u all_proxy -u ALL_PROXY cargo packager -p roam --release --formats dmg
 
 `.github/workflows/package.yml`，矩阵是 mac / windows / linux × amd64 / arm64。
 
-触发限定在 **push 到 main、push `v*` tag、以及手动 dispatch** —— 不是所有分支。每个矩阵
-项都是一次完整的依赖树构建（含 gpui），六份并行；特性分支不需要安装包。push 到 main 时，
-`release` job 会创建 `main-<完整 commit SHA>` 标签对应的 prerelease，并挂上本次产物；显示名
-使用七位短 SHA。push `v*` tag 时则创建正式 Release 并标记为 latest。手动 dispatch 只保留
-Actions artifact，不发布 Release。
+触发限定在 **push 到 main、push `vX.Y.Z` tag、以及手动 dispatch**。共享 CI
+通过后才构建安装包，包和更新清单全部验签成功后上传到草稿 Release，再统一发布。
+
+- `main`：生成 `X.Y.Z-dev.<GITHUB_RUN_NUMBER>` 开发版，每次运行版本号递增，
+  不标记为 latest。如果 Cargo 当前是正式版本，自动使用下一个 patch 作为开发目标。
+  例如 `0.1.0` 的 main 推送会生成 `0.1.1-dev.123`。
+- `vX.Y.Z`：版本必须与 Cargo 一致，发布正式版并标记为 latest；六个平台都必须
+  构建成功。先运行 `python3 scripts/release.py set X.Y.Z`，提交版本变更后创建标签。
+- 手动 dispatch：生成开发版本的 Actions artifact，不发布 Release 或更新清单。
+- 已发布的版本不可覆盖，重跑失败的草稿可以继续上传。
+
+`scripts/release.py` 同时修改 workspace 版本与 Cargo.lock 中本地包版本，不更新
+依赖。macOS 的 Info.plist 保持系统要求的数字版本，`RoamVersion` 保留完整 SemVer；
+Debian 开发版使用 `~dev.N`，保证它排在对应正式版之前。
 
 下表的"状态"一律指**在本机验证到哪一步**；各平台当前的 CI 结果以 GitHub Actions 为准。
 
@@ -113,7 +122,7 @@ CI 先用矩阵里的 target 显式执行
 构建步骤不放在 cargo-packager hook 中：hook 在 Unix 上通过 `sh` 执行，在 Windows 上通过
 `cmd.exe` 执行，依赖 shell 变量展开会让其中一侧直接失败。
 
-**没有验证过的平台标了 `continue-on-error: true`。** 那不是为了让徽章好看：已验证的平台
+**开发版允许未验证的平台失败，正式版要求全部平台成功。** 那不是为了让徽章好看：已验证的平台
 一旦坏掉照样让整个 run 变红，而没建过的平台不会把它掩盖掉。每个 `true` 都是一句关于
 "到底验证到哪"的声明 —— 某个平台第一次成功出包之后，就该把它删掉。
 
@@ -182,3 +191,60 @@ AppImage 的工具链在两个架构下都齐：`AppRun-{x86_64,aarch64}`、
 - Linux 与 Windows 的构建与打包格式（`deb`/`appimage`/`nsis`/`wix` 一个都没跑过）。
 
 [cargo-packager]: https://github.com/crabnebula-dev/cargo-packager
+
+## 自动更新
+
+更新实现参考 Beacon，放在独立的 `roam-updater` crate；网络操作运行在 Tokio，
+设置页与主窗口共享更新状态。默认在启动 15 秒后检查，此后每 24 小时检查；默认不
+自动下载。开发版默认选择开发渠道，正式版默认选择稳定渠道，用户选择保存在
+与 profiles.toml 同目录的 `updates.toml`。下载缓存位于同目录的 `updates/`。
+网络使用系统/环境代理配置。更新只选择高于当前版本的发布，跳过草稿，稳定渠道
+还会过滤预发布版本。
+
+设置 → 应用更新提供渠道切换、自动检查/下载、手动检查、下载取消、进度、失败重试、
+发布说明、错误复制与安装结果。侧栏更新按钮在有新版本或下载完成时高亮。
+安装必须确认重启；正在排队或执行的文件传输会阻止安装，在辅助进程准备前后
+都会重新检查。关闭设置页不会取消后台检查或下载。
+
+| 安装形式 | 更新方式 |
+| --- | --- |
+| macOS `.app` | 下载签名 `.app.tar.gz`，在可写的应用目录中替换并重启，替换或重新打开失败时恢复旧应用 |
+| Windows NSIS | 下载签名安装器，退出后显示安装进度，安装到原目录并重新启动 |
+| Linux AppImage | 下载签名 AppImage，在原文件系统中替换并重新启动，失败时恢复旧文件 |
+| `.deb`、源码与便携二进制 | 检查版本并提供发布页入口，通过包管理器或手动安装 |
+
+辅助进程由当前程序复制而来，在 GPUI/Tokio 初始化前处理 `--roam-update`，等待
+主程序释放退出锁后才开始安装。更新清单和包使用 Minisign 验签，下载大小限制为
+2 GiB，并与签名清单的长度精确匹配；取消、下载失败和验签失败清除临时下载。
+安装前再次验签，重启后显示安装结果。包管理器安装不会被直接覆盖。
+
+### 签名密钥
+
+Roam 使用独立于 Beacon 的长期签名密钥。公钥提交在
+`assets/packaging/update-public-key`，由客户端和发布校验器共同内置，CI 不允许
+通过环境变量替换信任的公钥。私钥位于仓库之外：
+`~/.local/share/roam/update-signing/roam-update.key`，目录权限 0700，私钥权限 0600。
+请另外安全备份私钥；GitHub Secrets 不能读回。不要为每次发布重新生成密钥，
+已有客户端只信任原来的公钥。
+
+仓库 Secrets：
+
+- `ROAM_UPDATE_PRIVATE_KEY`：cargo-packager 私钥文件的原文。
+- `ROAM_UPDATE_PRIVATE_KEY_PASSWORD`：私钥有密码时配置，没有密码则留空。
+
+维护命令（初次配置时才生成密钥）：
+
+```sh
+cargo install cargo-packager --version 0.11.8 --locked
+cargo packager signer generate --path /secure/location/roam-update.key
+# 将 .pub 公钥文件复制到 assets/packaging/update-public-key。
+gh secret set ROAM_UPDATE_PRIVATE_KEY --repo yoogoc/roam < /secure/location/roam-update.key
+```
+
+发布缺少私钥时会在构建前报错，使用不匹配私钥则在验签阶段失败。开发版允许缺少
+失败的未验证平台，更新客户端会明确提示相应平台没有可用更新包。正式版要求全部
+平台完整。这里的更新签名与 Apple Developer ID / 公证及 Windows 代码签名是不同
+机制，仍需按前文配置操作系统的分发签名。
+
+参考：[cargo-packager 更新签名](https://docs.crabnebula.dev/packager/updater/)、
+[GitHub Release API](https://docs.github.com/en/rest/releases/releases)。

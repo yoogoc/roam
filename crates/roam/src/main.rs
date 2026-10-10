@@ -29,6 +29,9 @@ fn profile_store() -> Result<ProfileStore> {
 }
 
 fn main() -> Result<()> {
+    if let Some(result) = roam_updater::helper_main() {
+        return result;
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -56,6 +59,12 @@ fn main() -> Result<()> {
             gpui_kit::init(cx);
             // Installs the keyboard bindings; without it every shortcut is inert.
             roam_ui::init_with_shortcuts(cx, &shortcuts);
+            let config_directory = store
+                .path()
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or_else(|| std::path::Path::new("."));
+            roam_ui::init_updater(rt.clone(), config_directory.to_path_buf(), cx);
 
             let bounds = Bounds::centered(None, size(px(1180.), px(760.)), cx);
 

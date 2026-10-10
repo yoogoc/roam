@@ -3,6 +3,12 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: false
+        default: ""
 
 env:
   CARGO_TERM_COLOR: always
@@ -23,6 +29,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Apply release version
+        if: inputs.version != ''
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: python scripts/release.py set "$RELEASE_VERSION"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -36,10 +50,13 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy -p roam-core --all-targets -- -D warnings
+        run: cargo clippy -p roam-core -p roam-updater --all-targets --locked -- -D warnings
 
       - name: Tests
-        run: cargo test -p roam-core
+        run: cargo test -p roam-core -p roam-updater --locked
+
+      - name: Release script tests
+        run: python -m unittest discover -s scripts/tests -v
 
       # Real protocols: signing, XML/JSON parsing, listing pagination, multipart
       # and one-shot uploads, presigning, PROPFIND, ssh. Everything above this
@@ -74,6 +91,14 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Apply release version
+        if: inputs.version != ''
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: python scripts/release.py set "$RELEASE_VERSION"
 
       - uses: dtolnay/rust-toolchain@stable
         with:

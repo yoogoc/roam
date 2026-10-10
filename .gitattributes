@@ -1,0 +1,3 @@
+
+# Signed bytes must survive Windows checkout without newline conversion.
+/crates/roam-updater/tests/fixtures/package -text

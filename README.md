@@ -26,7 +26,7 @@ server can stay open side by side while Roam transfers data between them.
 | **Work across storage** | Multiple independent tabs and cross-backend copy, upload, download, move, progress in a separate transfer window, cancellation, and resumable downloads. |
 | **Use familiar file tools** | Create folders, rename, duplicate, delete with confirmation, drag files in from Finder, and inspect capability-aware context menus. |
 | **Preview before opening** | DuckDB data grids, PDF pages, Office content, structured text, images, archive trees, audio controls, and video thumbnails, with bounded reads for remote storage. |
-| **Stay in control** | Light and dark themes, collapsible sidebar sections, editable keyboard shortcuts, and confirmation before closing a tab or quitting. |
+| **Stay in control** | Light and dark themes, collapsible sidebar sections, editable keyboard shortcuts, signed application updates, and confirmation before closing a tab or quitting. |
 | **Inspect object history** | Browse, preview, download, and restore object versions when the backend exposes versioning. |
 
 Downloads first open a system folder picker, letting you choose where to save
@@ -38,6 +38,20 @@ The browser keeps its full content area. Closing the transfer window leaves
 transfers running; use the transfer button at the bottom of the sidebar to
 reopen it. Progress, speed, cancellation, retries and completed-task cleanup
 are available in that window.
+
+## Application updates
+
+Open **Settings → Application updates**, or use the update button at the bottom
+of the sidebar. Roam checks after startup and every 24 hours; automatic downloads
+are optional. Stable builds default to the stable channel, and development builds
+to the development channel. Restarting to install always requires confirmation,
+and is blocked while file transfers are queued or running.
+
+Update manifests and packages are signed. macOS applications, Windows NSIS
+installations and Linux AppImages can install updates in place. Source builds,
+portable binaries and Debian packages offer a release-page link for manual or
+package-manager installation. Older Roam versions need one manual upgrade to
+receive this feature. See [release and signing setup](docs/PACKAGING.md#自动更新).
 
 ## Supported storage
 

@@ -1,41 +1,66 @@
 name: package
 
-# Every push to main, plus tags, plus on demand. Deliberately *not* every branch:
-# each entry below is a full build of the dependency tree — gpui included — six
-# times over, and a feature branch does not need installers.
+# Main pushes publish development prereleases; vX.Y.Z tags publish formal
+# releases. Manual runs produce artifacts only. All paths run the shared CI.
 on:
   push:
     branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
-  # Bundled DuckDB compiles C++; limit parallel jobs to fit hosted runners.
   CARGO_BUILD_JOBS: 2
 
 jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+      name: ${{ steps.release.outputs.name }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+      make_latest: ${{ steps.release.outputs.make_latest }}
+      publish: ${{ steps.release.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate and prepare version
+        id: release
+        run: python scripts/release.py prepare
+
+  checks:
+    needs: prepare
+    uses: ./.github/workflows/ci.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+
   package:
+    needs: [prepare, checks]
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
-    # Only the platforms that have never been built are allowed to fail, so a break
-    # on a proven one still turns the run red. Each `true` below is a claim about
-    # what has actually been verified, not a way to keep the badge green — remove it
-    # the first time that platform packages successfully.
-    continue-on-error: ${{ matrix.unproven }}
+    # Development builds tolerate unverified packaging targets. Formal
+    # releases require every target; shared lint/build/tests must always pass.
+    continue-on-error: ${{ needs.prepare.outputs.prerelease == 'true' && matrix.unproven }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Verified locally, repeatedly: this is the one that is known to work.
+          # Built, mounted and launched on this machine. See docs/PACKAGING.md.
           - name: macos-arm64
             runner: macos-15
             target: aarch64-apple-darwin
             formats: app,dmg
             unproven: false
 
-          # Cross-compiled on the same arm64 runner rather than asking for an Intel
-          # one: the macOS SDK builds both, and the Intel runners are being retired.
+          # Cross-compiled on the same arm64 runner rather than asking for an
+          # Intel one: the macOS SDK produces both, and the Intel runners are
+          # on their way out.
           - name: macos-amd64
             runner: macos-15
             target: x86_64-apple-darwin
@@ -54,8 +79,8 @@ jobs:
             formats: deb,appimage
             unproven: true
 
-          # nsis rather than wix: cargo-packager fetches NSIS itself, while WiX wants
-          # a separate toolset install.
+          # nsis rather than wix: cargo-packager downloads NSIS itself, while
+          # WiX wants a separate toolset installed first.
           - name: windows-amd64
             runner: windows-2022
             target: x86_64-pc-windows-msvc
@@ -70,19 +95,38 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Apply release version
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: python scripts/release.py set "$RELEASE_VERSION"
 
+      - name: Validate updater signing configuration
+        shell: bash
+        env:
+          RELEASE_PUBLISH: ${{ needs.prepare.outputs.publish }}
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.ROAM_UPDATE_PRIVATE_KEY }}
+        run: |
+          if [ "$RELEASE_PUBLISH" = "true" ] && [ -z "$CARGO_PACKAGER_SIGN_PRIVATE_KEY" ]; then
+            echo "::error::Configure ROAM_UPDATE_PRIVATE_KEY before publishing signed updates."
+            exit 1
+          fi
+          test -s assets/packaging/update-public-key
+
+      # Use the stable Rust toolchain for each packaging target.
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # Six jobs sharing one key would evict each other on every run.
+          # Six jobs on one key would evict each other every run.
           key: ${{ matrix.name }}
-          workspaces: . -> target
 
-      # What gpui's Linux backend links against. Discovered by building in a
-      # container rather than guessed — see docs/PACKAGING.md.
+      # The same list CI builds with -- X11, Wayland, Vulkan, fonts, ALSA.
       - name: Linux build dependencies
         if: startsWith(matrix.runner, 'ubuntu')
         run: |
@@ -94,80 +138,175 @@ jobs:
             libasound2-dev libfontconfig1-dev libfreetype6-dev \
             libgbm-dev libvulkan-dev
 
-      # `cargo install` rather than a prebuilt-binary action: cargo-packager is not
-      # in taiki-e/install-action's tool list (checked), so that route would just
-      # fail. The cache above covers the rebuild cost after the first run.
+      # `cargo install` rather than a prebuilt-binary action: cargo-packager is
+      # not in taiki-e/install-action's tool list, so that route would simply
+      # fail. The cache above covers the rebuild after the first run.
       - name: Install cargo-packager
-        run: cargo install cargo-packager --locked
+        run: cargo install cargo-packager --version 0.11.8 --locked
 
-      # Build explicitly instead of relying on cargo-packager's shell hook. Hooks
-      # run through `sh` on Unix and `cmd.exe` on Windows, so optional-target shell
-      # expansion cannot be portable across the matrix.
-      - name: Build application
-        run: cargo build --release -p roam --target ${{ matrix.target }}
+      # Build explicitly rather than through a packager hook. Hooks run under
+      # `sh` on Unix and `cmd.exe` on Windows, so no single hook string can
+      # expand `--target` on both.
+      - name: Build
+        run: cargo build --locked --release -p roam --target ${{ matrix.target }}
 
       - name: Package
+        if: runner.os != 'Linux'
+        shell: bash
         env:
-          # linuxdeploy mounts its own AppImage to run, which needs FUSE. Without
-          # this it dies with `terminate called after throwing an instance of
-          # 'std::logic_error'` — measured in a container, and runners hit the same
-          # wall. Extracting instead of mounting sidesteps it.
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.ROAM_UPDATE_PRIVATE_KEY }}
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.ROAM_UPDATE_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [ -z "$CARGO_PACKAGER_SIGN_PRIVATE_KEY" ]; then unset CARGO_PACKAGER_SIGN_PRIVATE_KEY CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD; fi
+          cargo packager -p roam --release --target ${{ matrix.target }} --formats ${{ matrix.formats }}
+
+      - name: Package Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          PACKAGE_TARGET: ${{ matrix.target }}
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.ROAM_UPDATE_PRIVATE_KEY }}
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.ROAM_UPDATE_PRIVATE_KEY_PASSWORD }}
+          # linuxdeploy needs this on runners without FUSE.
           APPIMAGE_EXTRACT_AND_RUN: 1
-        run: >
-          cargo packager -p roam --release
-          --target ${{ matrix.target }}
-          --formats ${{ matrix.formats }}
+        run: |
+          if [ -z "$CARGO_PACKAGER_SIGN_PRIVATE_KEY" ]; then unset CARGO_PACKAGER_SIGN_PRIVATE_KEY CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD; fi
+          python scripts/release.py deb-config --target "$PACKAGE_TARGET" --output target/release-deb.json
+          DEB_CONFIG=$(cat target/release-deb.json)
+          cargo packager --config "$DEB_CONFIG" --formats deb
+          cargo packager -p roam --release --target "$PACKAGE_TARGET" --formats appimage
+
+      - name: Give signed macOS archives unique release names
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_PUBLISH: ${{ needs.prepare.outputs.publish }}
+        run: |
+          UPDATE_FLAGS=()
+          if [ "$RELEASE_PUBLISH" != "true" ]; then UPDATE_FLAGS+=(--unsigned); fi
+          python scripts/updates.py stage-macos --directory "target/${{ matrix.target }}/release" --platform "${{ matrix.name }}" --version "$RELEASE_VERSION" "${UPDATE_FLAGS[@]}"
 
       - uses: actions/upload-artifact@v4
         with:
           name: roam-${{ matrix.name }}
-          # Whatever that platform produced. Listing exact filenames would mean
-          # encoding the version, and the version lives in Cargo.toml.
+          # The version is applied to Cargo before building and packaging.
           path: |
             target/${{ matrix.target }}/release/*.dmg
             target/${{ matrix.target }}/release/*.deb
             target/${{ matrix.target }}/release/*.AppImage
             target/${{ matrix.target }}/release/*-setup.exe
             target/${{ matrix.target }}/release/*.msi
+            target/${{ matrix.target }}/release/*.app.tar.gz
+            target/${{ matrix.target }}/release/*.sig
           if-no-files-found: error
 
-  # Main pushes publish a prerelease; version tags publish a normal release.
   release:
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-    needs: package
+    if: needs.prepare.outputs.publish == 'true'
+    needs: [prepare, checks, package]
     runs-on: ubuntu-24.04
+    # Reruns of the same release cannot upload concurrently. Distinct main
+    # pushes keep their own builds rather than cancelling earlier versions.
+    concurrency:
+      group: release-${{ needs.prepare.outputs.tag }}
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
-      - name: Describe release
-        id: release
+      - name: Refuse to replace a published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         shell: bash
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
-            echo "name=Roam $GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
-            echo "make_latest=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=main-$GITHUB_SHA" >> "$GITHUB_OUTPUT"
-            echo "name=Roam main ${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
-            echo "make_latest=false" >> "$GITHUB_OUTPUT"
+          if gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" > release.json 2> release-error.txt; then
+            python3 - <<'PY'
+          import json
+          from pathlib import Path
+          if not json.loads(Path("release.json").read_text())["draft"]:
+              raise SystemExit("This release is already published; use a new version.")
+          PY
+          elif ! grep -q '\(HTTP 404\)' release-error.txt; then
+            cat release-error.txt
+            exit 1
           fi
+
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: update-manifest
+      - name: Install cargo-packager signer
+        run: cargo install cargo-packager --version 0.11.8 --locked
 
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
 
+      - name: Build and sign update manifest
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.ROAM_UPDATE_PRIVATE_KEY }}
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.ROAM_UPDATE_PRIVATE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          UPDATE_FLAGS=()
+          if [ "$RELEASE_PRERELEASE" = "true" ]; then UPDATE_FLAGS+=(--allow-missing); fi
+          python scripts/updates.py manifest --artifacts artifacts --repository "$GITHUB_REPOSITORY" --version "$RELEASE_VERSION" --output artifacts/update.json "${UPDATE_FLAGS[@]}"
+          cargo packager signer sign artifacts/update.json
+          cargo run --locked -p roam-updater --bin verify-update -- artifacts
+
+      - name: Record build provenance and available packages
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          packages = sorted(path for path in Path("artifacts").rglob("*") if path.is_file())
+          if not packages or any(not path.is_file() for path in packages):
+              raise SystemExit("No release packages found, or unexpected artifact layout")
+          if len({path.name for path in packages}) != len(packages):
+              raise SystemExit("Release asset names must be unique across platforms")
+          channel = "Development build (pre-release)" if os.environ["RELEASE_PRERELEASE"] == "true" else "Formal release"
+          url = f'{os.environ["GITHUB_SERVER_URL"]}/{os.environ["GITHUB_REPOSITORY"]}/actions/runs/{os.environ["GITHUB_RUN_ID"]}'
+          lines = [
+              f'{channel}: **{os.environ["RELEASE_VERSION"]}**',
+              f'Commit: `{os.environ["GITHUB_SHA"]}`',
+              f'Checks and packaging: [workflow run]({url})',
+              "", "Available packages:",
+          ]
+          lines.extend(f"- `{path.name}` ({path.parent.name.removeprefix('roam-')})" for path in packages)
+          Path("release-notes.md").write_text("\n\n".join(lines) + "\n", encoding="utf-8")
+          PY
+
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.release.outputs.tag }}
+          tag_name: ${{ needs.prepare.outputs.tag }}
           target_commitish: ${{ github.sha }}
-          name: ${{ steps.release.outputs.name }}
-          prerelease: ${{ steps.release.outputs.prerelease }}
-          make_latest: ${{ steps.release.outputs.make_latest }}
+          name: ${{ needs.prepare.outputs.name }}
+          body_path: release-notes.md
+          # Upload everything to a draft before making it visible to users.
+          draft: true
+          prerelease: ${{ needs.prepare.outputs.prerelease == 'true' }}
+          make_latest: "false"
           generate_release_notes: true
           files: artifacts/**/*
-          # A release whose packages are missing a platform is better published
-          # incomplete than not published at all — the matrix says which failed.
-          fail_on_unmatched_files: false
+          fail_on_unmatched_files: true
+
+      - name: Publish completed release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_LATEST: ${{ needs.prepare.outputs.make_latest }}
+        shell: bash
+        run: gh release edit "$RELEASE_TAG" --draft=false --latest="$RELEASE_LATEST"

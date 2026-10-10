@@ -66,6 +66,7 @@ pub struct Workspace {
     /// them and can span two sessions.
     transfers: Entity<TransferPanel>,
     transfer_window: Option<AnyWindowHandle>,
+    _updater_subscription: Option<Subscription>,
     form: Option<Entity<ConnectionForm>>,
     shortcut_settings: ShortcutSettings,
     shortcut_settings_path: PathBuf,
@@ -149,6 +150,10 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         let engine = TransferEngine::new(rt.clone(), DEFAULT_CONCURRENCY);
+        let updater_subscription = crate::updates::maybe_store(cx).map(|updater| {
+            updater.update(cx, |updater, _| updater.engine = Some(engine.clone()));
+            cx.observe(&updater, |_, _, cx| cx.notify())
+        });
         let transfers = cx.new(|cx| TransferPanel::new(engine.clone(), window, cx));
         let tree = cx.new(|cx| DirTreeView::new(local.clone(), cx));
 
@@ -221,6 +226,7 @@ impl Workspace {
             tree,
             transfers,
             transfer_window: None,
+            _updater_subscription: updater_subscription,
             form: None,
             shortcut_settings,
             shortcut_settings_path,
@@ -1057,6 +1063,27 @@ impl Workspace {
                                 this.open_settings(window, cx);
                             })),
                     )
+                    .when_some(crate::updates::maybe_store(cx), |el, updater| {
+                        let available = matches!(
+                            updater.read(cx).status,
+                            crate::updates::Status::Available(_) | crate::updates::Status::Ready(_)
+                        );
+                        el.child(
+                            Button::new("open-updates")
+                                .icon(IconName::Redo)
+                                .ghost()
+                                .small()
+                                .tooltip(if available {
+                                    "有新版本可用"
+                                } else {
+                                    "应用更新"
+                                })
+                                .when(available, |button| button.text_color(cx.theme().link))
+                                .on_click(|_, window, cx| {
+                                    crate::updates::open_settings(window, cx)
+                                }),
+                        )
+                    })
                     .child(
                         Button::new("open-transfers")
                             .icon(IconName::ArrowDown)
@@ -1082,6 +1109,27 @@ impl Workspace {
                 .title("设置 · 快捷键")
                 .w(px(640.).min(window.viewport_size().width - px(48.)))
                 .max_h(dialog_max_height(window.viewport_size().height))
+                .when(crate::updates::maybe_store(_cx).is_some(), |dialog| {
+                    dialog.child(
+                        h_flex()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .child(format!("Roam {}", env!("CARGO_PKG_VERSION"))),
+                            )
+                            .child(
+                                Button::new("settings-updates")
+                                    .outline()
+                                    .small()
+                                    .label("应用更新")
+                                    .on_click(|_, window, cx| {
+                                        crate::updates::open_settings(window, cx);
+                                    }),
+                            ),
+                    )
+                })
                 .child(form.clone())
                 .confirm_cancel("保存", "取消", move |window, cx| {
                     let settings = form.read(cx).settings(cx);

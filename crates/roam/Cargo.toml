@@ -10,6 +10,7 @@ name = "roam"
 path = "src/main.rs"
 
 [dependencies]
+roam-updater.workspace = true
 roam-core.workspace = true
 roam-ui.workspace = true
 gpui-kit.workspace = true
@@ -60,6 +61,7 @@ icons = [
 ]
 
 [package.metadata.packager.macos]
+info-plist-path = "../../assets/packaging/Info.plist"
 minimum-system-version = "11.0"
 
 # Uncomment once a Developer ID Application certificate exists. The identity

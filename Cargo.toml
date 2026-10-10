@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/roam-core", "crates/roam-ui", "crates/roam"]
+members = ["crates/roam-core", "crates/roam-ui", "crates/roam", "crates/roam-updater"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +10,10 @@ license = "MIT"
 [workspace.dependencies]
 roam-core = { path = "crates/roam-core" }
 roam-ui = { path = "crates/roam-ui" }
+roam-updater = { path = "crates/roam-updater" }
+flate2 = "1"
+tempfile = "3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "socks"] }
 
 opendal = { version = "0.58.1", default-features = false, features = [
     "auto-register-services",

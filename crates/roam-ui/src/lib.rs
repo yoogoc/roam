@@ -17,7 +17,9 @@ mod preview_audio;
 mod service_icon;
 mod shortcut_settings;
 mod transfer_panel;
+mod updates;
 mod workspace;
+pub use updates::{init as init_updater, open_settings as open_update_settings};
 
 pub use actions::{ShortcutSettings, init, init_with_shortcuts};
 pub use assets::Assets;
