@@ -66,6 +66,12 @@ cargo-packager 只打包、**不构建**，因此先显式执行 `cargo build --
 全列出来，cargo-packager 按平台各取所需 —— 已验证 bundle 里的 `roam.icns` 与源文件
 **字节一致**。
 
+Windows 构建通过 `crates/roam/build.rs` 将 `roam.ico` 嵌入 `roam.exe` 的图标资源
+编号 `1`，供 GPUI 窗口、任务栏和快捷方式读取；安装器的图标配置不能替代这一步。
+资源编译失败会使构建失败。主程序使用 Windows GUI 子系统，启动时不创建控制台窗口。
+Windows 打包任务还会检查实际生成的 PE 文件，确认 GUI 子系统、资源编号和各尺寸图标
+均正确，防止将缺图标或带控制台的程序发布出去。
+
 界面图标由 `gpui_kit::assets::Assets` 提供，应用启动时显式注册。
 `crates/roam-ui/assets/icons/` 中保留的是旧版资源；当前构建不使用它们。
 

@@ -158,6 +158,10 @@ jobs:
       - name: Build
         run: cargo build --locked --release -p roam --target ${{ matrix.target }}
 
+      - name: Check Windows application resources
+        if: runner.os == 'Windows'
+        run: python scripts/check_windows_binary.py target/${{ matrix.target }}/release/roam.exe
+
       - name: Package
         if: runner.os != 'Linux'
         shell: bash
