@@ -116,6 +116,7 @@ impl Browser {
 
         let subscriptions = vec![
             cx.subscribe_in(&table, window, Self::on_table_event),
+            cx.observe(&table, |_, _, cx| cx.notify()),
             cx.subscribe_in(&filter, window, Self::on_filter_event),
         ];
 
@@ -362,7 +363,10 @@ impl Browser {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(entry) = self.selected_entry(cx) {
+        let entries = self.table.read(cx).delegate().selected_entries();
+        if !entries.is_empty() {
+            self.download_entries(entries, cx);
+        } else if let Some(entry) = self.selected_entry(cx) {
             self.download(entry, window, cx);
         }
     }
@@ -442,6 +446,8 @@ impl Browser {
         // immediately; the fresh listing replaces it when it completes.
         let cached = self.cache.get(&self.key(&to));
         self.table.update(cx, |state, cx| {
+            state.clear_selection(cx);
+            state.delegate_mut().clear_selected();
             let entries = cached
                 .map(|hit| hit.entries.as_ref().clone())
                 .unwrap_or_default();
@@ -814,6 +820,13 @@ impl Browser {
     }
 
     fn download(&mut self, entry: DirEntry, _: &mut Window, cx: &mut Context<Self>) {
+        self.download_entries(vec![entry], cx);
+    }
+
+    fn download_entries(&mut self, entries: Vec<DirEntry>, cx: &mut Context<Self>) {
+        if entries.is_empty() {
+            return;
+        }
         // Capture the source before opening the picker: navigation or a session
         // change must not pair the selected entry with a different backend.
         let vfs = self.vfs.clone();
@@ -831,7 +844,11 @@ impl Browser {
                     };
                     let _ = this.update_in(cx, |browser, window, cx| {
                         browser.plan_and_queue("下载", window, cx, async move {
-                            plan_download(&vfs, &entry, &dest).await
+                            let mut transfers = Vec::new();
+                            for entry in entries {
+                                transfers.extend(plan_download(&vfs, &entry, &dest).await?);
+                            }
+                            Ok(transfers)
                         });
                     });
                 }
@@ -1172,6 +1189,74 @@ impl Browser {
         }))
     }
 
+    fn render_selection_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let delegate = self.table.read(cx).delegate();
+        let count = delegate.selected_count();
+        let capability = self.vfs.capability();
+        let can_download = capability.read
+            && (capability.list || !delegate.selected_entries().iter().any(DirEntry::is_dir));
+        h_flex()
+            .debug_selector(|| "batch-selection-bar".into())
+            .flex_none()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().accent.opacity(0.1))
+            .child(
+                Icon::new(IconName::Check)
+                    .size_4()
+                    .text_color(cx.theme().accent_foreground),
+            )
+            .child(div().text_sm().child(format!("已选择 {count} 项")))
+            .child(div().flex_1())
+            .child(
+                Button::new("select-all-visible")
+                    .ghost()
+                    .small()
+                    .label("全选当前列表")
+                    .disabled(self.loading)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.table.update(cx, |state, cx| {
+                            state.delegate_mut().select_all(true);
+                            cx.notify();
+                        });
+                    })),
+            )
+            .child(
+                div().debug_selector(|| "batch-download".into()).child(
+                    Button::new("batch-download")
+                        .primary()
+                        .small()
+                        .icon(IconName::ArrowDown)
+                        .label("批量下载")
+                        .disabled(self.loading || !can_download)
+                        .tooltip("下载选中项到同一个文件夹")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let entries = this.table.read(cx).delegate().selected_entries();
+                            this.download_entries(entries, cx);
+                        })),
+                ),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "clear-file-selection".into())
+                    .child(
+                        Button::new("clear-file-selection")
+                            .ghost()
+                            .small()
+                            .label("取消选择")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.table.update(cx, |state, cx| {
+                                    state.delegate_mut().clear_selected();
+                                    cx.notify();
+                                });
+                            })),
+                    ),
+            )
+    }
+
     fn render_error(&self, err: &Error, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
             .gap_2()
@@ -1309,6 +1394,9 @@ impl Render for Browser {
             .on_action(cx.listener(Self::action_toggle_preview))
             .on_action(cx.listener(Self::action_toggle_hidden))
             .child(self.render_toolbar(cx))
+            .when(self.table.read(cx).delegate().selected_count() > 0, |el| {
+                el.child(self.render_selection_bar(cx))
+            })
             .when_some(self.error.clone(), |el, err| {
                 el.child(self.render_error(&err, cx))
             })
@@ -1633,6 +1721,47 @@ pub(crate) mod tests {
             let table = self.browser.read_with(&self.cx, |b, _| b.table.clone());
             table.update(&mut self.cx, |state, cx| state.set_selected_row(row, cx));
             self.cx.run_until_parked();
+        }
+
+        pub(crate) fn click_selector(
+            &mut self,
+            selector: &'static str,
+            modifiers: gpui_kit::Modifiers,
+        ) {
+            self.cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let point = self
+                .cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("missing {selector}"))
+                .center();
+            self.cx.simulate_click(point, modifiers);
+            self.cx.run_until_parked();
+        }
+
+        pub(crate) fn selected_names(&self) -> Vec<String> {
+            self.browser.read_with(&self.cx, |browser, cx| {
+                browser
+                    .table
+                    .read(cx)
+                    .delegate()
+                    .selected_entries()
+                    .iter()
+                    .map(|entry| entry.name.to_string())
+                    .collect()
+            })
+        }
+
+        pub(crate) fn selector_visible(&mut self, selector: &'static str) -> bool {
+            self.cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            self.cx.debug_bounds(selector).is_some()
+        }
+
+        pub(crate) fn download_picker_open(&self) -> bool {
+            self.cx.did_prompt_for_paths()
         }
 
         /// Dispatch a real keystroke through the window's key bindings.
@@ -2191,6 +2320,118 @@ mod mutation_tests {
         h.choose_download_folder(destination.path());
         h.settle_transfers();
         assert_eq!(h.transfer_snapshot().len(), 1);
+        assert_eq!(
+            std::fs::read(destination.path().join("notes.txt")).unwrap(),
+            b"note"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn batch_checkboxes_show_a_separate_bar_and_clear_without_navigating(cx: &mut TestAppContext) {
+        let mut h = Harness::new(cx);
+        assert!(!h.selector_visible("batch-selection-bar"));
+        h.click_selector("file-checkbox-0", Default::default());
+        h.click_selector("file-checkbox-3", Default::default());
+        assert_eq!(h.selected_names(), ["documents", "README.md"]);
+        assert_eq!(h.cwd(), "");
+        assert!(h.selector_visible("batch-selection-bar"));
+        h.click_selector("clear-file-selection", Default::default());
+        assert!(h.selected_names().is_empty());
+        assert!(!h.selector_visible("batch-selection-bar"));
+    }
+
+    #[gpui_kit::test]
+    fn batch_download_uses_one_picker_and_keeps_original_sources_after_navigation(
+        cx: &mut TestAppContext,
+    ) {
+        let mut h = Harness::new(cx);
+        let destination = tempfile::tempdir().unwrap();
+        h.click_selector("file-checkbox-0", Default::default());
+        h.click_selector("file-checkbox-3", Default::default());
+        h.click_selector("batch-download", Default::default());
+        assert!(h.transfer_snapshot().is_empty());
+        h.double_click("media");
+        assert!(
+            h.selected_names().is_empty(),
+            "navigation clears batch selection"
+        );
+        h.choose_download_folder(destination.path());
+        h.settle_transfers();
+        let tasks = h.transfer_snapshot();
+        assert_eq!(tasks.len(), 3);
+        assert!(
+            tasks
+                .iter()
+                .all(|task| task.state == roam_core::TaskState::Done)
+        );
+        assert_eq!(
+            std::fs::read(destination.path().join("README.md")).unwrap(),
+            b"# readme"
+        );
+        assert_eq!(
+            std::fs::read(destination.path().join("documents/contract.pdf")).unwrap(),
+            b"pdf"
+        );
+        assert_eq!(
+            std::fs::read(destination.path().join("documents/reports/q1.xlsx")).unwrap(),
+            b"xlsx"
+        );
+        assert!(
+            !h.download_picker_open(),
+            "the whole batch shares one picker"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn select_all_only_includes_filtered_rows_and_cancelling_batch_download_queues_nothing(
+        cx: &mut TestAppContext,
+    ) {
+        let mut h = Harness::new(cx);
+        h.click_selector("select-all-files", Default::default());
+        assert_eq!(h.selected_names().len(), 4);
+        h.set_filter(".txt");
+        assert_eq!(h.selected_names(), ["notes.txt"]);
+        h.click_selector("batch-download", Default::default());
+        h.cancel_download_folder();
+        assert!(h.transfer_snapshot().is_empty());
+        assert_eq!(
+            h.selected_names(),
+            ["notes.txt"],
+            "cancel keeps the selection"
+        );
+        h.set_filter("");
+        h.click_selector("select-all-files", Default::default());
+        assert_eq!(h.selected_names().len(), 4);
+        h.click_selector("select-all-files", Default::default());
+        assert!(h.selected_names().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn modifier_row_clicks_select_ranges_and_download_shortcut_uses_the_batch(
+        cx: &mut TestAppContext,
+    ) {
+        let mut h = Harness::new(cx);
+        let destination = tempfile::tempdir().unwrap();
+        h.click_selector(
+            "file-row-3",
+            gpui_kit::Modifiers {
+                platform: true,
+                ..Default::default()
+            },
+        );
+        h.click_selector(
+            "file-row-2",
+            gpui_kit::Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(h.selected_names(), ["notes.txt", "README.md"]);
+        h.focus_list();
+        h.keystroke("cmd-d");
+        h.choose_download_folder(destination.path());
+        h.settle_transfers();
+        assert_eq!(h.transfer_snapshot().len(), 2);
         assert_eq!(
             std::fs::read(destination.path().join("notes.txt")).unwrap(),
             b"note"

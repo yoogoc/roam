@@ -39,6 +39,14 @@ transfers running; use the transfer button at the bottom of the sidebar to
 reopen it. Progress, speed, cancellation, retries and completed-task cleanup
 are available in that window.
 
+Select files and folders with the row checkboxes, or use **⌘/Ctrl-click** to
+toggle individual entries and **Shift-click** to select a range. The header
+checkbox selects the current filtered list. A separate selection bar shows the
+count, **Batch download** and **Clear selection**. Batch downloads ask for one
+destination folder and preserve each selected folder's tree; the download
+shortcut also uses the batch selection. Filtering removes hidden selections,
+and navigating to another directory clears them.
+
 ## Application updates
 
 Open **Settings → Application updates**, or use the update button at the bottom

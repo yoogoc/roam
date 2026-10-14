@@ -1,9 +1,13 @@
-use std::rc::Rc;
+use std::{collections::HashSet, rc::Rc, sync::Arc};
 
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
-use gpui_kit::component::{ActiveTheme, Icon, IconName, h_flex};
-use gpui_kit::{App, Context, IntoElement, ParentElement, Styled, Window, div, px};
+use gpui_kit::component::{ActiveTheme, Disableable, Icon, IconName, Sizable, h_flex};
+use gpui_kit::{
+    App, Context, Div, InteractiveElement, IntoElement, MouseButton, ParentElement, Stateful,
+    StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px,
+};
 use roam_core::{DirEntry, EntryAction, EntryKind, SortKey, Vfs, ViewOptions, fmt, view_indices};
 
 /// Invoked when a context-menu item is chosen. The `Browser` installs this so
@@ -11,9 +15,10 @@ use roam_core::{DirEntry, EntryAction, EntryKind, SortKey, Vfs, ViewOptions, fmt
 /// only knows how to build the menu.
 pub type ActionHandler = Rc<dyn Fn(EntryAction, DirEntry, &mut Window, &mut App)>;
 
-const COL_NAME: usize = 0;
-const COL_SIZE: usize = 1;
-const COL_MODIFIED: usize = 2;
+const COL_SELECT: usize = 0;
+const COL_NAME: usize = 1;
+const COL_SIZE: usize = 2;
+const COL_MODIFIED: usize = 3;
 
 /// Supplies rows to the virtualized table.
 ///
@@ -35,6 +40,9 @@ pub struct EntriesDelegate {
     /// menu is derived from.
     vfs: Option<Vfs>,
     on_action: Option<ActionHandler>,
+    /// Batch selection uses paths, so sorting never changes its targets.
+    selected: HashSet<Arc<str>>,
+    selection_anchor: Option<Arc<str>>,
 }
 
 impl EntriesDelegate {
@@ -43,6 +51,10 @@ impl EntriesDelegate {
             entries: Vec::new(),
             view: Vec::new(),
             columns: vec![
+                Column::new("select", "")
+                    .width(px(44.))
+                    .resizable(false)
+                    .selectable(false),
                 Column::new("name", "名称").width(px(340.)).ascending(),
                 Column::new("size", "大小")
                     .width(px(110.))
@@ -59,6 +71,8 @@ impl EntriesDelegate {
             loading: false,
             vfs: None,
             on_action: None,
+            selected: HashSet::new(),
+            selection_anchor: None,
         }
     }
 
@@ -79,6 +93,70 @@ impl EntriesDelegate {
 
     pub fn entries(&self) -> &[DirEntry] {
         &self.entries
+    }
+
+    pub fn selected_count(&self) -> usize {
+        self.selected.len()
+    }
+
+    pub fn selected_entries(&self) -> Vec<DirEntry> {
+        self.view
+            .iter()
+            .filter_map(|&ix| {
+                let entry = &self.entries[ix as usize];
+                self.selected.contains(&entry.path).then(|| entry.clone())
+            })
+            .collect()
+    }
+
+    pub fn clear_selected(&mut self) {
+        self.selected.clear();
+        self.selection_anchor = None;
+    }
+
+    pub fn select_all(&mut self, checked: bool) {
+        self.clear_selected();
+        if checked {
+            self.selected.extend(
+                self.view
+                    .iter()
+                    .map(|&ix| self.entries[ix as usize].path.clone()),
+            );
+        }
+    }
+
+    fn all_selected(&self) -> bool {
+        !self.view.is_empty() && self.selected.len() == self.view.len()
+    }
+
+    fn select_entry(&mut self, path: Arc<str>, checked: bool, range: bool) {
+        if range
+            && let Some(anchor) = self.selection_anchor.as_ref()
+            && let Some(start) = self
+                .view
+                .iter()
+                .position(|&ix| &self.entries[ix as usize].path == anchor)
+            && let Some(end) = self
+                .view
+                .iter()
+                .position(|&ix| self.entries[ix as usize].path == path)
+        {
+            for ix in &self.view[start.min(end)..=start.max(end)] {
+                let path = &self.entries[*ix as usize].path;
+                if checked {
+                    self.selected.insert(path.clone());
+                } else {
+                    self.selected.remove(path);
+                }
+            }
+            return;
+        }
+        if checked {
+            self.selected.insert(path.clone());
+        } else {
+            self.selected.remove(&path);
+        }
+        self.selection_anchor = Some(path);
     }
 
     pub fn is_loading(&self) -> bool {
@@ -139,6 +217,18 @@ impl EntriesDelegate {
 
     fn resort(&mut self) {
         self.view = view_indices(&self.entries, self.options());
+        // Batch actions only include visible entries. Hidden or removed items
+        // must not remain selected behind a filter or a refreshed listing.
+        if !self.selected.is_empty() {
+            self.selected = self
+                .view
+                .iter()
+                .filter_map(|&ix| {
+                    let path = &self.entries[ix as usize].path;
+                    self.selected.contains(path).then(|| path.clone())
+                })
+                .collect();
+        }
     }
 
     fn options(&self) -> ViewOptions<'_> {
@@ -189,6 +279,70 @@ impl TableDelegate for EntriesDelegate {
         self.loading && self.entries.is_empty()
     }
 
+    fn render_th(
+        &mut self,
+        col_ix: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        if col_ix == COL_SELECT {
+            div()
+                .debug_selector(|| "select-all-files".into())
+                .child(
+                    Checkbox::new("select-all-files")
+                        .small()
+                        .accessibility_label("全选当前列表")
+                        .tooltip("全选当前列表")
+                        .checked(self.all_selected())
+                        .disabled(self.loading || self.view.is_empty())
+                        .on_click(cx.listener(|state, checked, _, cx| {
+                            state.delegate_mut().select_all(*checked);
+                            cx.notify();
+                        })),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .child(self.columns[col_ix].name.clone())
+                .into_any_element()
+        }
+    }
+
+    fn render_tr(
+        &mut self,
+        row_ix: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> Stateful<Div> {
+        let path = self.entry(row_ix).map(|entry| entry.path.clone());
+        div()
+            .id(("row", row_ix))
+            .debug_selector(move || format!("file-row-{row_ix}"))
+            .when(
+                path.as_ref()
+                    .is_some_and(|path| self.selected.contains(path)),
+                |el| el.bg(cx.theme().accent.opacity(0.15)),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |state, event: &gpui_kit::MouseDownEvent, _, cx| {
+                    if (event.modifiers.platform
+                        || event.modifiers.control
+                        || event.modifiers.shift)
+                        && !state.delegate().loading
+                        && let Some(path) = path.clone()
+                    {
+                        let checked =
+                            event.modifiers.shift || !state.delegate().selected.contains(&path);
+                        state
+                            .delegate_mut()
+                            .select_entry(path, checked, event.modifiers.shift);
+                        cx.notify();
+                    }
+                }),
+            )
+    }
+
     fn perform_sort(
         &mut self,
         col_ix: usize,
@@ -206,11 +360,15 @@ impl TableDelegate for EntriesDelegate {
         // The header arrow reads from the columns we own, so move the active
         // marker here and clear it everywhere else.
         for (ix, column) in self.columns.iter_mut().enumerate() {
-            column.sort = Some(if ix == col_ix {
-                sort
+            column.sort = if ix == COL_SELECT {
+                None
             } else {
-                ColumnSort::Default
-            });
+                Some(if ix == col_ix {
+                    sort
+                } else {
+                    ColumnSort::Default
+                })
+            };
         }
 
         self.resort();
@@ -228,6 +386,33 @@ impl TableDelegate for EntriesDelegate {
         };
 
         match col_ix {
+            COL_SELECT => {
+                let path = entry.path.clone();
+                let checked = self.selected.contains(&path);
+                div()
+                    .id(("file-checkbox-cell", row_ix))
+                    .debug_selector(move || format!("file-checkbox-{row_ix}"))
+                    // Do not let modifier clicks on the checkbox also toggle
+                    // the containing row's batch selection.
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(
+                        Checkbox::new(("select-file", row_ix))
+                            .small()
+                            .accessibility_label(format!("选择 {}", entry.name))
+                            .checked(checked)
+                            .disabled(self.loading)
+                            .on_click(cx.listener(move |state, checked, window, cx| {
+                                state.delegate_mut().select_entry(
+                                    path.clone(),
+                                    *checked,
+                                    window.modifiers().shift,
+                                );
+                                cx.notify();
+                            })),
+                    )
+                    .into_any_element()
+            }
             COL_NAME => {
                 let icon = if entry.is_dir() {
                     IconName::Folder
@@ -542,5 +727,40 @@ mod hidden_tests {
 
         delegate.set_show_hidden(true);
         assert_eq!(names(&delegate), vec![".hidden.txt"]);
+    }
+
+    #[test]
+    fn sorting_keeps_selected_paths_and_a_refresh_discards_deleted_entries() {
+        let mut delegate = EntriesDelegate::new();
+        delegate.reset(listing(), false);
+        delegate.select_entry("visible.txt".into(), true, false);
+        delegate.ascending = false;
+        delegate.resort();
+        assert_eq!(delegate.selected_entries()[0].name.as_ref(), "visible.txt");
+        let remaining = listing()
+            .into_iter()
+            .filter(|entry| entry.name.as_ref() != "visible.txt")
+            .collect();
+        delegate.reset(remaining, false);
+        assert_eq!(delegate.selected_count(), 0);
+    }
+
+    #[test]
+    fn hiding_dotfiles_removes_them_from_batch_actions_and_showing_them_does_not_reselect() {
+        let mut delegate = EntriesDelegate::new();
+        delegate.set_show_hidden(true);
+        delegate.reset(listing(), false);
+        delegate.select_all(true);
+        assert_eq!(delegate.selected_count(), 4);
+        delegate.set_show_hidden(false);
+        assert_eq!(delegate.selected_count(), 2);
+        assert!(
+            delegate
+                .selected_entries()
+                .iter()
+                .all(|entry| !entry.is_hidden())
+        );
+        delegate.set_show_hidden(true);
+        assert_eq!(delegate.selected_count(), 2);
     }
 }
