@@ -16,7 +16,7 @@ use gpui_kit::{
     Task, Window, div, prelude::FluentBuilder, px,
 };
 use roam_core::transfer::{
-    Transfer, plan_download, plan_duplicate_dir, plan_move_dir, plan_upload,
+    Transfer, plan_copy_entries, plan_download, plan_duplicate_dir, plan_move_dir, plan_upload,
 };
 use roam_core::{
     DirEntry, EntryAction, Error, Generation, ListingCache, ObjectVersion, RemotePath, SessionId,
@@ -24,11 +24,12 @@ use roam_core::{
 };
 
 use crate::actions::{
-    BROWSER_CONTEXT, DeleteSelected, DownloadSelected, FocusFilter, GoBack, GoForward, GoUp,
-    NewFolder, OpenSelected, Reload, ToggleHidden, TogglePreview,
+    BROWSER_CONTEXT, CopySelected, DeleteSelected, DownloadSelected, FocusFilter, GoBack,
+    GoForward, GoUp, NewFolder, OpenSelected, PasteFiles, Reload, ToggleHidden, TogglePreview,
 };
 use crate::delegate::EntriesDelegate;
 use crate::dialog::DialogButtons;
+use crate::file_clipboard::{self, FileClipboard};
 use crate::name_dialog::NameDialog;
 use crate::placeholders;
 use crate::preview::PreviewPanel;
@@ -75,6 +76,7 @@ pub struct Browser {
     /// pane can report that it is busy — and so tests can wait for the work
     /// instead of guessing at a delay.
     pending_mutations: usize,
+    pasting: bool,
 
     /// Holding the task here means dropping/replacing it aborts the listing.
     listing: Option<Task<()>>,
@@ -98,6 +100,9 @@ impl Browser {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        if cx.try_global::<FileClipboard>().is_none() {
+            cx.set_global(FileClipboard::default());
+        }
         let table = cx.new(|cx| {
             TableState::new(EntriesDelegate::new(), window, cx)
                 .row_selectable(true)
@@ -117,6 +122,7 @@ impl Browser {
         let subscriptions = vec![
             cx.subscribe_in(&table, window, Self::on_table_event),
             cx.observe(&table, |_, _, cx| cx.notify()),
+            cx.observe_global::<FileClipboard>(|_, cx| cx.notify()),
             cx.subscribe_in(&filter, window, Self::on_filter_event),
         ];
 
@@ -150,6 +156,7 @@ impl Browser {
             loading: false,
             error: None,
             pending_mutations: 0,
+            pasting: false,
             listing: None,
             name_dialog: None,
             filter,
@@ -247,6 +254,15 @@ impl Browser {
             EntryAction::NewFolder => self.prompt_new_folder(window, cx),
             EntryAction::Rename => self.prompt_rename(entry, window, cx),
             EntryAction::Duplicate => self.duplicate(entry, window, cx),
+            EntryAction::Copy => {
+                let selected = self.table.read(cx).delegate().selected_entries();
+                let entries = if selected.iter().any(|selected| selected.path == entry.path) {
+                    selected
+                } else {
+                    vec![entry]
+                };
+                self.copy_entries(entries, window, cx);
+            }
             EntryAction::Download => self.download(entry, window, cx),
             EntryAction::ShowVersions => self.show_versions(entry, window, cx),
             EntryAction::Delete => self.confirm_delete(entry, window, cx),
@@ -373,6 +389,117 @@ impl Browser {
 
     fn action_toggle_hidden(&mut self, _: &ToggleHidden, _: &mut Window, cx: &mut Context<Self>) {
         self.toggle_hidden(cx);
+    }
+
+    fn action_copy(&mut self, _: &CopySelected, window: &mut Window, cx: &mut Context<Self>) {
+        let mut entries = self.table.read(cx).delegate().selected_entries();
+        if entries.is_empty()
+            && let Some(entry) = self.selected_entry(cx)
+        {
+            entries.push(entry);
+        }
+        self.copy_entries(entries, window, cx);
+    }
+
+    fn copy_entries(
+        &mut self,
+        entries: Vec<DirEntry>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if entries.is_empty() {
+            return;
+        }
+        if !self.vfs.capability().read
+            || (!self.vfs.capability().list && entries.iter().any(DirEntry::is_dir))
+        {
+            window.push_notification("该连接不支持读取所选项目", cx);
+            return;
+        }
+        let count = entries.len();
+        file_clipboard::copy(self.vfs.clone(), entries, cx);
+        window.push_notification(
+            format!("已复制 {count} 项，请切换到目标连接或目录后粘贴"),
+            cx,
+        );
+    }
+
+    fn action_paste(&mut self, _: &PasteFiles, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pasting {
+            return;
+        }
+        if !self.vfs.capability().write || !self.vfs.capability().list {
+            window.push_notification("目标连接不支持写入或列出目录", cx);
+            return;
+        }
+        let Some(copied) = file_clipboard::read(cx) else {
+            return;
+        };
+        let target = self.vfs.clone();
+        let destination = self.cwd.clone();
+        let engine = self.engine.clone();
+        let notify = self.on_transfers_queued.clone();
+        self.pasting = true;
+        self.pending_mutations += 1;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let plan =
+                plan_copy_entries(&copied.source, &copied.entries, &target, &destination).await;
+            let queued = this
+                .update_in(cx, |browser, window, cx| match plan {
+                    Ok(transfers) if !transfers.is_empty() => {
+                        let count = transfers.len();
+                        let batch = engine.enqueue_batch(transfers);
+                        window.push_notification(
+                            format!(
+                                "已向 {} 加入 {count} 个复制任务，同名项目将创建副本",
+                                target.label()
+                            ),
+                            cx,
+                        );
+                        if let Some(notify) = notify {
+                            notify(window, cx);
+                        }
+                        Some(batch)
+                    }
+                    result => {
+                        browser.pasting = false;
+                        browser.pending_mutations -= 1;
+                        let message = match result {
+                            Err(error) => error.full_message(),
+                            _ => "没有可复制的文件".into(),
+                        };
+                        window.push_notification(message, cx);
+                        cx.notify();
+                        None
+                    }
+                })
+                .ok()
+                .flatten();
+            let Some(batch) = queued else {
+                return;
+            };
+            while batch.is_active() {
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                if this.update(cx, |_, _| {}).is_err() {
+                    return;
+                }
+            }
+            let _ = this.update(cx, |browser, cx| {
+                browser.pasting = false;
+                browser.pending_mutations -= 1;
+                if browser.vfs.same_backend(&target) {
+                    browser.cache.invalidate(&browser.key(&destination));
+                    if browser.cwd == destination {
+                        browser.reload(cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Show or hide dotfiles.
@@ -1157,6 +1284,24 @@ impl Browser {
                     })),
             )
             .child(
+                div().debug_selector(|| "paste-files".into()).child(
+                    Button::new("paste-files")
+                        .icon(gpui_kit::assets::IconName::ClipboardPaste)
+                        .label("粘贴")
+                        .ghost()
+                        .small()
+                        .tooltip("粘贴文件到当前连接（同名项目创建副本）")
+                        .disabled(
+                            self.pasting
+                                || !self.vfs.capability().write
+                                || cx.global::<FileClipboard>().0.is_none(),
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.action_paste(&PasteFiles, window, cx)
+                        })),
+                ),
+            )
+            .child(
                 // Also in the row context menu, but an empty directory has no
                 // row to right-click — without this button there would be no way
                 // to create the first folder.
@@ -1198,6 +1343,7 @@ impl Browser {
         h_flex()
             .debug_selector(|| "batch-selection-bar".into())
             .flex_none()
+            .flex_wrap()
             .gap_2()
             .px_3()
             .py_2()
@@ -1223,6 +1369,19 @@ impl Browser {
                             cx.notify();
                         });
                     })),
+            )
+            .child(
+                div().debug_selector(|| "copy-files".into()).child(
+                    Button::new("copy-files")
+                        .ghost()
+                        .small()
+                        .icon(IconName::Copy)
+                        .label("复制")
+                        .disabled(self.loading || !can_download)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.action_copy(&CopySelected, window, cx)
+                        })),
+                ),
             )
             .child(
                 div().debug_selector(|| "batch-download".into()).child(
@@ -1391,6 +1550,8 @@ impl Render for Browser {
             .on_action(cx.listener(Self::action_new_folder))
             .on_action(cx.listener(Self::action_delete))
             .on_action(cx.listener(Self::action_download))
+            .on_action(cx.listener(Self::action_copy))
+            .on_action(cx.listener(Self::action_paste))
             .on_action(cx.listener(Self::action_toggle_preview))
             .on_action(cx.listener(Self::action_toggle_hidden))
             .child(self.render_toolbar(cx))
@@ -1589,6 +1750,9 @@ pub(crate) mod tests {
         /// a moment, until the pane reports it has finished loading.
         pub(crate) fn settle(&mut self) {
             for _ in 0..400 {
+                self.cx
+                    .background_executor
+                    .advance_clock(Duration::from_millis(10));
                 self.cx.run_until_parked();
                 let done = self.browser.read_with(&self.cx, |b, _| !b.is_busy());
                 if done {
@@ -1762,6 +1926,18 @@ pub(crate) mod tests {
 
         pub(crate) fn download_picker_open(&self) -> bool {
             self.cx.did_prompt_for_paths()
+        }
+
+        pub(crate) fn switch_connection(&mut self, vfs: Vfs) {
+            self.browser
+                .update(&mut self.cx, |browser, cx| browser.set_vfs(vfs, cx));
+            self.settle();
+        }
+
+        pub(crate) fn copy_plain_text(&mut self) {
+            self.cx.update(|_, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string("ordinary text".into()))
+            });
         }
 
         /// Dispatch a real keystroke through the window's key bindings.
@@ -2338,6 +2514,75 @@ mod mutation_tests {
         h.click_selector("clear-file-selection", Default::default());
         assert!(h.selected_names().is_empty());
         assert!(!h.selector_visible("batch-selection-bar"));
+    }
+
+    #[gpui_kit::test]
+    fn copying_a_batch_then_switching_connection_pastes_original_files_and_refreshes_the_target(
+        cx: &mut TestAppContext,
+    ) {
+        let mut h = Harness::new(cx);
+        let destination = tempfile::tempdir().unwrap();
+        std::fs::write(destination.path().join("README.md"), b"existing").unwrap();
+        h.click_selector("file-checkbox-0", Default::default());
+        h.click_selector("file-checkbox-3", Default::default());
+        h.click_selector("copy-files", Default::default());
+        let target = roam_core::Vfs::local(
+            roam_core::Rt::new().unwrap(),
+            destination.path().to_str().unwrap(),
+        )
+        .unwrap();
+        h.switch_connection(target);
+        h.click_selector("paste-files", Default::default());
+        h.settle();
+        assert_eq!(
+            std::fs::read(destination.path().join("README.md")).unwrap(),
+            b"existing"
+        );
+        assert_eq!(
+            std::fs::read(destination.path().join("README 副本.md")).unwrap(),
+            b"# readme"
+        );
+        assert_eq!(
+            std::fs::read(destination.path().join("documents/reports/q1.xlsx")).unwrap(),
+            b"xlsx"
+        );
+        assert!(
+            h.names().contains(&"README 副本.md".to_string()),
+            "the destination listing refreshes after copying"
+        );
+        assert!(h.path().join("README.md").exists());
+        assert!(
+            h.transfer_snapshot()
+                .iter()
+                .all(|task| task.state == roam_core::TaskState::Done)
+        );
+    }
+
+    #[gpui_kit::test]
+    fn copy_paste_shortcuts_work_and_copying_text_invalidates_the_file_clipboard(
+        cx: &mut TestAppContext,
+    ) {
+        let mut h = Harness::new(cx);
+        h.select_row("notes.txt");
+        h.focus_list();
+        h.keystroke("cmd-c");
+        h.double_click("media");
+        h.focus_list();
+        h.keystroke("cmd-v");
+        assert_eq!(
+            std::fs::read(h.path().join("media/notes.txt")).unwrap(),
+            b"note"
+        );
+        let count = h.transfer_snapshot().len();
+        h.copy_plain_text();
+        h.focus_list();
+        h.keystroke("cmd-v");
+        assert_eq!(
+            h.transfer_snapshot().len(),
+            count,
+            "ordinary text must not paste an old batch"
+        );
+        assert!(!h.path().join("media/notes 副本.txt").exists());
     }
 
     #[gpui_kit::test]

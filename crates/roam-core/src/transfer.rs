@@ -79,6 +79,8 @@ impl TaskState {
 /// What a single task moves.
 #[derive(Clone)]
 pub enum Transfer {
+    /// Preserve directory entries, including empty folders, during a copy.
+    CreateDir { vfs: Vfs, path: Arc<str> },
     Download {
         vfs: Vfs,
         remote: Arc<str>,
@@ -120,7 +122,7 @@ impl Transfer {
         match self {
             Self::Download { .. } => Operation::Download,
             Self::Upload { .. } => Operation::Upload,
-            Self::Copy { .. } => Operation::Copy,
+            Self::Copy { .. } | Self::CreateDir { .. } => Operation::Copy,
             Self::MoveDir { .. } => Operation::Move,
         }
     }
@@ -128,6 +130,7 @@ impl Transfer {
     /// Short label for the transfer list.
     pub fn label(&self) -> Arc<str> {
         match self {
+            Self::CreateDir { path: dir, .. } => path::basename(dir).into(),
             Self::Download { remote, .. } => path::basename(remote).into(),
             Self::Upload { local, .. } => local
                 .file_name()
@@ -141,6 +144,7 @@ impl Transfer {
 
     fn known_size(&self) -> Option<u64> {
         match self {
+            Self::CreateDir { .. } => Some(0),
             Self::Download { size, .. } | Self::Copy { size, .. } => *size,
             Self::Upload { local, .. } => std::fs::metadata(local).ok().map(|m| m.len()),
             // Summed from the flattened list, so the progress bar is honest from
@@ -259,6 +263,17 @@ pub struct TransferEngine {
     inner: Arc<EngineInner>,
 }
 
+/// Observe one batch independently of other transfers and task-list cleanup.
+pub struct TransferBatch(Vec<Arc<TaskRecord>>);
+
+impl TransferBatch {
+    pub fn is_active(&self) -> bool {
+        self.0
+            .iter()
+            .any(|record| !record.state.lock().unwrap().is_finished())
+    }
+}
+
 struct EngineInner {
     rt: Rt,
     permits: Arc<Semaphore>,
@@ -281,6 +296,10 @@ impl TransferEngine {
     /// Queue one transfer. Returns immediately; the work runs on the tokio
     /// runtime behind the global semaphore.
     pub fn enqueue(&self, transfer: Transfer) -> TaskId {
+        self.enqueue_record(transfer).id
+    }
+
+    fn enqueue_record(&self, transfer: Transfer) -> Arc<TaskRecord> {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
 
         let record = Arc::new(TaskRecord {
@@ -295,9 +314,17 @@ impl TransferEngine {
         });
 
         self.inner.tasks.lock().unwrap().push(record.clone());
-        self.spawn_task(record);
+        self.spawn_task(record.clone());
+        record
+    }
 
-        id
+    pub fn enqueue_batch(&self, transfers: impl IntoIterator<Item = Transfer>) -> TransferBatch {
+        TransferBatch(
+            transfers
+                .into_iter()
+                .map(|transfer| self.enqueue_record(transfer))
+                .collect(),
+        )
     }
 
     /// Run a task's work, from queued through to a terminal state.
@@ -495,6 +522,10 @@ impl TransferEngine {
 
 async fn run(transfer: &Transfer, progress: &Arc<TaskProgress>) -> Result<()> {
     match transfer {
+        Transfer::CreateDir { vfs, path } => {
+            progress.check()?;
+            vfs.create_dir(path).await
+        }
         Transfer::Download {
             vfs, remote, local, ..
         } => {
@@ -511,7 +542,17 @@ async fn run(transfer: &Transfer, progress: &Arc<TaskProgress>) -> Result<()> {
             to,
             to_path,
             ..
-        } => from.copy_to(from_path, to, to_path, progress.clone()).await,
+        } => {
+            progress.check()?;
+            // Directory tasks may run concurrently with their children.
+            if to.capability().create_dir
+                && let Some(parent) = path::parent(to_path).filter(|parent| !parent.is_empty())
+            {
+                to.create_dir(&parent).await?;
+            }
+            progress.check()?;
+            from.copy_to(from_path, to, to_path, progress.clone()).await
+        }
         Transfer::MoveDir {
             vfs,
             from,
@@ -563,6 +604,98 @@ async fn move_dir(
 }
 
 // ── planning ──────────────────────────────────────────────────────────────
+
+/// Plan a batch between connections. Colliding top-level entries receive a
+/// free copy name; directories keep their complete tree under that name.
+/// Planning performs no writes, so a failed listing cannot queue half a batch.
+pub async fn plan_copy_entries(
+    from: &Vfs,
+    entries: &[DirEntry],
+    to: &Vfs,
+    destination: &str,
+) -> Result<Vec<Transfer>> {
+    use std::collections::HashSet;
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !from.capability().read || !to.capability().write || !to.capability().list {
+        return Err(Error::Unsupported(
+            "复制需要源连接可读、目标连接可写且可列出目录".into(),
+        ));
+    }
+    let destination = path::as_dir(destination);
+    // Reject before listing: a directory must never be copied into itself.
+    for entry in entries.iter().filter(|entry| entry.is_dir()) {
+        if from.same_backend(to) && destination.starts_with(&path::as_dir(&entry.path)) {
+            return Err(Error::Config("不能将文件夹复制到它自身或子目录中".into()));
+        }
+    }
+    let mut taken: HashSet<String> = to
+        .list_all(&destination)
+        .await?
+        .into_iter()
+        .map(|entry| entry.name.to_string())
+        .collect();
+    let mut transfers = Vec::new();
+    let mut sources = HashSet::new();
+    for entry in entries {
+        if !sources.insert(entry.path.clone()) {
+            continue;
+        }
+        let name = if taken.contains(entry.name.as_ref()) {
+            path::duplicate_name_with(&entry.name, |name| taken.contains(name))
+        } else {
+            entry.name.to_string()
+        };
+        taken.insert(name.clone());
+        if entry.is_dir() {
+            let root = path::as_dir(&entry.path);
+            let target = path::join_dir(&destination, &name);
+            let contents = from.list_recursive(&root).await?;
+            if to.capability().create_dir {
+                transfers.push(Transfer::CreateDir {
+                    vfs: to.clone(),
+                    path: target.clone().into(),
+                });
+            }
+            for file in contents {
+                let relative = file
+                    .path
+                    .strip_prefix(&root)
+                    .ok_or_else(|| Error::Config("源目录返回了目录之外的路径".into()))?;
+                if relative.is_empty() {
+                    continue;
+                }
+                let target = path::join_file(&target, relative);
+                if file.is_dir() {
+                    if to.capability().create_dir {
+                        transfers.push(Transfer::CreateDir {
+                            vfs: to.clone(),
+                            path: path::as_dir(&target).into(),
+                        });
+                    }
+                } else {
+                    transfers.push(Transfer::Copy {
+                        from: from.clone(),
+                        from_path: file.path,
+                        to: to.clone(),
+                        to_path: target.into(),
+                        size: file.size,
+                    });
+                }
+            }
+        } else {
+            transfers.push(Transfer::Copy {
+                from: from.clone(),
+                from_path: entry.path.clone(),
+                to: to.clone(),
+                to_path: path::join_file(&destination, &name).into(),
+                size: entry.size,
+            });
+        }
+    }
+    Ok(transfers)
+}
 
 /// Expand a remote entry into one download task per file.
 ///
@@ -1127,6 +1260,150 @@ mod tests {
             std::fs::read_to_string(out.path().join("tree/nested/c.txt")).unwrap(),
             "sea",
             "the nested structure is preserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_connection_copy_preserves_trees_empty_dirs_and_existing_targets() {
+        let (source_dir, source) = fixture();
+        std::fs::create_dir_all(source_dir.path().join("tree/empty")).unwrap();
+        let destination_dir = tempfile::tempdir().unwrap();
+        std::fs::write(destination_dir.path().join("a.txt"), b"keep me").unwrap();
+        std::fs::create_dir(destination_dir.path().join("tree")).unwrap();
+        std::fs::write(
+            destination_dir.path().join("tree/original.txt"),
+            b"original",
+        )
+        .unwrap();
+        let destination = Vfs::local(
+            Rt::from_current().unwrap(),
+            destination_dir.path().to_str().unwrap(),
+        )
+        .unwrap();
+        let entries = source.list_all("").await.unwrap();
+        let plan = plan_copy_entries(&source, &entries, &destination, "")
+            .await
+            .unwrap();
+        let engine = TransferEngine::new(Rt::from_current().unwrap(), DEFAULT_CONCURRENCY);
+        let batch = engine.enqueue_batch(plan);
+        settle(&engine).await;
+        assert!(!batch.is_active());
+        assert!(
+            engine
+                .snapshot()
+                .iter()
+                .all(|task| task.state == TaskState::Done)
+        );
+        assert_eq!(
+            std::fs::read(destination_dir.path().join("a.txt")).unwrap(),
+            b"keep me"
+        );
+        assert_eq!(
+            std::fs::read(destination_dir.path().join("a 副本.txt")).unwrap(),
+            b"hello"
+        );
+        assert_eq!(
+            std::fs::read(destination_dir.path().join("tree/original.txt")).unwrap(),
+            b"original"
+        );
+        assert_eq!(
+            std::fs::read(destination_dir.path().join("tree 副本/nested/c.txt")).unwrap(),
+            b"sea"
+        );
+        assert!(destination_dir.path().join("tree 副本/empty").is_dir());
+        assert!(source_dir.path().join("tree/nested/c.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn copying_a_directory_into_itself_is_rejected_without_mutations() {
+        let (dir, source) = fixture();
+        let entry = source
+            .list_all("")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.is_dir())
+            .unwrap();
+        for target in ["tree/", "tree/nested/"] {
+            let error = plan_copy_entries(&source, std::slice::from_ref(&entry), &source, target)
+                .await
+                .err()
+                .unwrap();
+            assert!(error.full_message().contains("自身或子目录"));
+        }
+        assert!(!dir.path().join("tree/tree").exists());
+    }
+
+    #[tokio::test]
+    async fn a_cross_copy_cancelled_while_queued_never_writes_the_destination() {
+        let (_source_dir, source) = fixture();
+        let destination_dir = tempfile::tempdir().unwrap();
+        let destination = Vfs::local(
+            Rt::from_current().unwrap(),
+            destination_dir.path().to_str().unwrap(),
+        )
+        .unwrap();
+        let entries: Vec<_> = source
+            .list_all("")
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|entry| !entry.is_dir())
+            .collect();
+        let engine = TransferEngine::new(Rt::from_current().unwrap(), 1);
+        let permit = engine.inner.permits.clone().acquire_owned().await.unwrap();
+        let batch = engine.enqueue_batch(
+            plan_copy_entries(&source, &entries, &destination, "")
+                .await
+                .unwrap(),
+        );
+        engine.cancel_all();
+        drop(permit);
+        settle(&engine).await;
+        assert!(!batch.is_active());
+        assert!(
+            engine
+                .snapshot()
+                .iter()
+                .all(|task| task.state == TaskState::Cancelled)
+        );
+        assert_eq!(
+            std::fs::read_dir(destination_dir.path()).unwrap().count(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_cross_connection_copy_can_be_retried() {
+        let (source_dir, source) = fixture();
+        let destination_dir = tempfile::tempdir().unwrap();
+        let destination = Vfs::local(
+            Rt::from_current().unwrap(),
+            destination_dir.path().to_str().unwrap(),
+        )
+        .unwrap();
+        let entries: Vec<_> = source
+            .list_all("")
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|entry| !entry.is_dir())
+            .collect();
+        let plan = plan_copy_entries(&source, &entries, &destination, "")
+            .await
+            .unwrap();
+        std::fs::remove_file(source_dir.path().join("a.txt")).unwrap();
+        let engine = TransferEngine::new(Rt::from_current().unwrap(), 1);
+        let ids = engine.enqueue_all(plan);
+        settle(&engine).await;
+        assert!(matches!(engine.snapshot()[0].state, TaskState::Failed(_)));
+        std::fs::write(source_dir.path().join("a.txt"), b"hello").unwrap();
+        assert!(engine.retry(ids[0]));
+        settle(&engine).await;
+        assert_eq!(engine.snapshot()[0].state, TaskState::Done);
+        assert_eq!(
+            std::fs::read(destination_dir.path().join("a.txt")).unwrap(),
+            b"hello"
         );
     }
 

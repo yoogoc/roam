@@ -15,7 +15,7 @@
 //! appears when the mouse passes over it".
 //!
 //! GPUI Kit supplies component icons; Roam additionally embeds service logos
-//! and the three protocol symbols used by its connection views.
+//! and protocol and transfer icons from the shared catalog.
 //! Nothing checking was the reason the icons went missing in the first place, and
 //! that is just as true of someone else's asset crate as of our own.
 
@@ -23,7 +23,7 @@ use std::borrow::Cow;
 
 use gpui_kit::{AssetSource, Result, SharedString};
 
-gpui_kit::assets::icon_assets!(ProtocolAssets, [HardDrive, FolderLock, Network]);
+gpui_kit::assets::icon_assets!(ExtraIcons, [HardDrive, FolderLock, Network, ClipboardPaste]);
 
 const SERVICE_ASSETS: &[(&str, &[u8])] = &[
     (
@@ -56,7 +56,7 @@ impl AssetSource for Assets {
         if let Some((_, bytes)) = SERVICE_ASSETS.iter().find(|(name, _)| *name == path) {
             return Ok(Some(Cow::Borrowed(bytes)));
         }
-        if let Some(bytes) = ProtocolAssets.load(path)? {
+        if let Some(bytes) = ExtraIcons.load(path)? {
             return Ok(Some(bytes));
         }
         gpui_kit::assets::Assets.load(path)
@@ -64,7 +64,7 @@ impl AssetSource for Assets {
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut paths = gpui_kit::assets::Assets.list(path)?;
-        paths.extend(ProtocolAssets.list(path)?);
+        paths.extend(ExtraIcons.list(path)?);
         paths.extend(
             SERVICE_ASSETS
                 .iter()

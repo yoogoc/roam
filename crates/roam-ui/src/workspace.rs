@@ -1545,6 +1545,9 @@ pub(crate) mod tests {
 
         pub(crate) fn settle(&mut self) {
             for _ in 0..400 {
+                self.cx
+                    .background_executor
+                    .advance_clock(Duration::from_millis(10));
                 self.cx.run_until_parked();
                 let done = self
                     .workspace
@@ -2598,6 +2601,40 @@ pub(crate) mod tests {
                 assert!(!profile.options.contains_key("secret_access_key"));
             });
         });
+    }
+
+    #[gpui_kit::test]
+    fn pasting_after_closing_the_source_tab_opens_the_transfer_window(cx: &mut TestAppContext) {
+        let mut h = Harness::new(cx);
+        let workspace = h.workspace.clone();
+        h.cx.update(|_, cx| {
+            let browser = workspace.read(cx).active_browser().read(cx);
+            let source = browser.vfs().clone();
+            let entry = browser.entry_named("local-only.txt", cx).unwrap();
+            crate::file_clipboard::copy(source, vec![entry], cx);
+        });
+        h.add_remote_profile();
+        h.new_tab();
+        h.connect("remote");
+        h.next_tab();
+        h.close_active_tab();
+        assert_eq!(h.tab_count(), 1);
+        h.cx.update(|window, cx| {
+            let browser = workspace.read(cx).active_browser().clone();
+            let focus = gpui_kit::Focusable::focus_handle(browser.read(cx), cx);
+            window.focus(&focus, cx);
+            window.dispatch_action(Box::new(crate::actions::PasteFiles), cx);
+        });
+        h.settle();
+        assert_eq!(
+            std::fs::read(h.remote_root.join("local-only.txt")).unwrap(),
+            b"local"
+        );
+        assert!(h.rows().contains(&"local-only.txt".to_string()));
+        assert!(
+            h.workspace
+                .read_with(&h.cx, |workspace, _| workspace.transfer_window.is_some())
+        );
     }
 
     #[gpui_kit::test]

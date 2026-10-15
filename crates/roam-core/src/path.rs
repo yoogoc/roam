@@ -131,16 +131,21 @@ fn split_extension(name: &str) -> (&str, &str) {
 
 /// A free name for a copy of `name`, avoiding everything in `taken`.
 pub fn duplicate_name(name: &str, taken: &[&str]) -> String {
+    duplicate_name_with(name, |candidate| taken.contains(&candidate))
+}
+
+/// The same naming policy with a lookup suitable for large destination lists.
+pub fn duplicate_name_with(name: &str, mut is_taken: impl FnMut(&str) -> bool) -> String {
     let (stem, ext) = split_extension(name);
 
     let first = format!("{stem} 副本{ext}");
-    if !taken.contains(&first.as_str()) {
+    if !is_taken(&first) {
         return first;
     }
 
     (2..)
         .map(|n| format!("{stem} 副本 {n}{ext}"))
-        .find(|candidate| !taken.contains(&candidate.as_str()))
+        .find(|candidate| !is_taken(candidate))
         .expect("an unbounded range always yields a free name")
 }
 

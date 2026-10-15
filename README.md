@@ -47,6 +47,15 @@ destination folder and preserve each selected folder's tree; the download
 shortcut also uses the batch selection. Filtering removes hidden selections,
 and navigating to another directory clears them.
 
+To copy between connections, select files or folders and choose **Copy** (or
+**⌘C / Ctrl+C**), switch to the destination connection and folder, then choose
+**Paste** (**⌘V / Ctrl+V**). These shortcuts are configurable in Settings.
+Copies appear in the transfer window with progress, cancellation and retries.
+Folder trees are preserved, including empty folders on backends that support
+directories. Existing top-level names receive a free copy name, preserving the
+original destination files. The source stays unchanged; cross-connection file
+data passes through Roam without a separate local download.
+
 ## Application updates
 
 Open **Settings → Application updates**, or use the update button at the bottom
@@ -221,6 +230,7 @@ shortcut. Changes are validated, saved, and applied immediately.
 | Filter directory | `⌘ F` | New folder | `⇧ ⌘ N` |
 | Delete selection | `⌘ Backspace` | Toggle preview | `Space` |
 | Toggle hidden files | `⇧ ⌘ .` | Download selection | `⌘ D` |
+| Copy files | `⌘ C` / `Ctrl+C` | Paste files | `⌘ V` / `Ctrl+V` |
 | New / close tab | `⌘ T` / `⌘ W` | Previous / next tab | `⇧ ⌘ [` / `⇧ ⌘ ]` |
 | Quit Roam | `⌘ Q` | | |
 

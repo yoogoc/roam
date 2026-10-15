@@ -20,6 +20,8 @@ pub enum EntryAction {
     Rename,
     /// Copy the entry alongside itself under a free name.
     Duplicate,
+    /// Remember the entry for pasting into another connection.
+    Copy,
     /// Delete the entry; directories are removed recursively.
     Delete,
     /// Copy the entry to the local downloads directory.
@@ -146,6 +148,12 @@ pub fn entry_menu(capability: &Capability, entry: &DirEntry) -> Vec<MenuItem> {
         capability.read && (entry.kind != EntryKind::Dir || capability.list),
         "该后端不支持读取",
     );
+    let copy = gate(
+        EntryAction::Copy,
+        "复制文件",
+        capability.read && (entry.kind != EntryKind::Dir || capability.list),
+        "该后端不支持读取",
+    );
 
     let versions = if entry.kind == EntryKind::Dir {
         // Versioning is per object; a prefix has no history of its own.
@@ -201,6 +209,7 @@ pub fn entry_menu(capability: &Capability, entry: &DirEntry) -> Vec<MenuItem> {
         new_folder,
         rename,
         duplicate,
+        copy,
         delete,
         download,
         versions,
@@ -449,6 +458,7 @@ mod tests {
             EntryAction::NewFolder,
             EntryAction::Rename,
             EntryAction::Duplicate,
+            EntryAction::Copy,
             EntryAction::Delete,
             EntryAction::Download,
             EntryAction::ShowVersions,
@@ -535,6 +545,7 @@ mod tests {
         }
 
         for action in [
+            EntryAction::Copy,
             EntryAction::CopyPath,
             EntryAction::CopyShareLink,
             EntryAction::Reload,

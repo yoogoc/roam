@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/roam-core", "crates/roam-ui", "crates/roam", "crates/roam-updater"]
 
 [workspace.package]
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 license = "MIT"
 

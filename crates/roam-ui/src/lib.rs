@@ -10,6 +10,7 @@ mod connection_form;
 mod delegate;
 mod dialog;
 mod dir_tree;
+mod file_clipboard;
 mod name_dialog;
 pub mod placeholders;
 mod preview;
