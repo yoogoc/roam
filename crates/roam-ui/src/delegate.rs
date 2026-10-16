@@ -286,7 +286,9 @@ impl TableDelegate for EntriesDelegate {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         if col_ix == COL_SELECT {
-            div()
+            h_flex()
+                .size_full()
+                .justify_center()
                 .debug_selector(|| "select-all-files".into())
                 .child(
                     Checkbox::new("select-all-files")
@@ -385,11 +387,13 @@ impl TableDelegate for EntriesDelegate {
             return div().into_any_element();
         };
 
-        match col_ix {
+        let content = match col_ix {
             COL_SELECT => {
                 let path = entry.path.clone();
                 let checked = self.selected.contains(&path);
-                div()
+                h_flex()
+                    .size_full()
+                    .justify_center()
                     .id(("file-checkbox-cell", row_ix))
                     .debug_selector(move || format!("file-checkbox-{row_ix}"))
                     // Do not let modifier clicks on the checkbox also toggle
@@ -453,7 +457,9 @@ impl TableDelegate for EntriesDelegate {
                 .child(fmt::modified(entry.modified))
                 .into_any_element(),
             _ => div().into_any_element(),
-        }
+        };
+
+        h_flex().size_full().child(content).into_any_element()
     }
 
     fn context_menu(
