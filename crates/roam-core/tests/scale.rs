@@ -506,11 +506,11 @@ fn the_transfer_snapshot_scales_with_task_count() {
         let full = started.elapsed();
 
         let started = std::time::Instant::now();
-        let overview = engine.overview(50);
+        let overview = engine.overview(0);
         let cheap = started.elapsed();
 
         println!(
-            "{:>6} tasks: snapshot() {full:>10.2?} for {} records  |  overview(50) {cheap:>10.2?} \
+            "{:>6} tasks: snapshot() {full:>10.2?} for {} records  |  overview(0) {cheap:>10.2?} \
              for {} rows (+{} total/{} active counted)",
             snap.len(),
             snap.len(),
@@ -520,7 +520,19 @@ fn the_transfer_snapshot_scales_with_task_count() {
         );
 
         // Ten polls a second is the panel's rate; the cheap path has to stay flat.
-        assert!(overview.recent.len() <= 50);
+        assert!(overview.recent.is_empty());
+        let started = std::time::Instant::now();
+        let items = engine.list_items();
+        eprintln!(
+            "{} lightweight task handles: {:?}",
+            items.len(),
+            started.elapsed()
+        );
+        assert_eq!(
+            items.len(),
+            snap.len(),
+            "the virtual list must retain every task"
+        );
         assert_eq!(overview.total, snap.len());
     }
 }

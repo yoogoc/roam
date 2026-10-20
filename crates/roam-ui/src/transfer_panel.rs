@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::progress::Progress;
@@ -8,11 +8,14 @@ use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, IconName, Root, Sizable, TitleBar, h_flex, v_flex,
 };
 use gpui_kit::{
-    ClickEvent, Context, InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle,
-    SharedString, StatefulInteractiveElement, Styled, Task, Window, div, prelude::FluentBuilder,
-    px,
+    ClickEvent, Context, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
+    StatefulInteractiveElement, Styled, Task, UniformListScrollHandle, Window, div,
+    prelude::FluentBuilder, px, uniform_list,
 };
-use roam_core::transfer::{TaskSnapshot, TaskState, TransferOverview};
+use roam_core::transfer::{
+    DownloadGroupHandle, DownloadGroupSnapshot, TaskId, TaskSnapshot, TaskState, TransferHandle,
+    TransferListItem, TransferOverview,
+};
 use roam_core::{TransferEngine, fmt};
 
 /// Progress repaint interval — about 10Hz.
@@ -22,22 +25,24 @@ use roam_core::{TransferEngine, fmt};
 /// more time drawing the panel than moving bytes.
 const POLL: Duration = Duration::from_millis(100);
 
-/// How many rows the panel draws. Dropping a folder makes one task per file, so
-/// the list has always been capped — what changed is that the engine is no longer
-/// asked to describe the rest.
-const VISIBLE_ROWS: usize = 50;
+#[derive(Clone)]
+enum Row {
+    File { task: TransferHandle, nested: bool },
+    Folder(Arc<DownloadGroupHandle>),
+}
 
 /// The independent transfer window content, with progress and task controls.
 pub struct TransferPanel {
     engine: TransferEngine,
-    /// Counts over every task plus the newest [`VISIBLE_ROWS`]. Polled at 10 Hz
-    /// while transfers run, which is why it must not be proportional to the task
-    /// count: 100k queued uploads used to mean cloning 100k snapshots ten times a
-    /// second for a list that shows fifty.
+    /// Counts are refreshed separately from the lightweight list structure.
     overview: TransferOverview,
+    items: Vec<TransferListItem>,
+    rows: Vec<Row>,
+    expanded: HashSet<TaskId>,
+    revision: Option<u64>,
     /// Held so the poll stops when the panel goes away.
     poll: Option<Task<()>>,
-    scroll: ScrollHandle,
+    scroll: UniformListScrollHandle,
 }
 
 impl TransferPanel {
@@ -50,8 +55,12 @@ impl TransferPanel {
                 failed: 0,
                 recent: Vec::new(),
             },
+            items: Vec::new(),
+            rows: Vec::new(),
+            expanded: HashSet::new(),
+            revision: None,
             poll: None,
-            scroll: ScrollHandle::default(),
+            scroll: UniformListScrollHandle::new(),
         }
     }
 
@@ -61,10 +70,10 @@ impl TransferPanel {
 
     /// Pick up newly queued work and start polling until everything settles.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.overview = self.engine.overview(VISIBLE_ROWS);
+        self.update_list();
         cx.notify();
 
-        if self.poll.is_some() || !self.engine.is_active() {
+        if self.poll.is_some() || self.overview.active == 0 {
             return;
         }
 
@@ -73,9 +82,9 @@ impl TransferPanel {
                 cx.background_executor().timer(POLL).await;
 
                 let still_running = this.update(cx, |this, cx| {
-                    this.overview = this.engine.overview(VISIBLE_ROWS);
+                    this.update_list();
                     cx.notify();
-                    this.engine.is_active()
+                    this.overview.active > 0
                 });
 
                 match still_running {
@@ -88,10 +97,51 @@ impl TransferPanel {
 
             let _ = this.update(cx, |this, cx| {
                 this.poll = None;
-                this.overview = this.engine.overview(VISIBLE_ROWS);
+                this.update_list();
                 cx.notify();
             });
         }));
+    }
+
+    fn update_list(&mut self) {
+        self.overview = self.engine.overview(0);
+        let revision = self.engine.revision();
+        if self.revision != Some(revision) {
+            self.items = self.engine.list_items();
+            self.revision = Some(revision);
+            let groups: HashSet<_> = self
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    TransferListItem::Folder(folder) => Some(folder.id()),
+                    _ => None,
+                })
+                .collect();
+            self.expanded.retain(|id| groups.contains(id));
+            self.rebuild_rows();
+        }
+    }
+
+    fn rebuild_rows(&mut self) {
+        self.rows.clear();
+        for item in &self.items {
+            match item {
+                TransferListItem::Task(task) => self.rows.push(Row::File {
+                    task: task.clone(),
+                    nested: false,
+                }),
+                TransferListItem::Folder(folder) => {
+                    self.rows.push(Row::Folder(Arc::new(folder.clone())));
+                    if self.expanded.contains(&folder.id()) {
+                        self.rows
+                            .extend(folder.children.iter().map(|task| Row::File {
+                                task: task.clone(),
+                                nested: true,
+                            }));
+                    }
+                }
+            }
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -121,7 +171,7 @@ impl TransferPanel {
             .bg(cx.theme().secondary)
             .child(div().text_sm().child(SharedString::from(format!(
                 "传输 · {} 项",
-                self.overview.total
+                self.items.len()
             ))))
             .when(active > 0, |el| {
                 el.child(
@@ -176,13 +226,22 @@ impl TransferPanel {
             )
     }
 
-    fn render_task(&self, task: &TaskSnapshot, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_task(
+        &self,
+        task: &TaskSnapshot,
+        group: Option<&DownloadGroupSnapshot>,
+        nested: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let id = task.id;
         let finished = task.state.is_finished();
+        let fraction = task
+            .fraction()
+            .or_else(|| group.map(|group| group.completed as f32 / group.files.max(1) as f32));
 
         // Progress as a number too: a bar alone cannot say "3.2 MB of 40 MB",
         // and for an unknown total the bar would be a lie.
-        let detail = match (task.total, &task.state) {
+        let mut detail = match (task.total, &task.state) {
             (_, TaskState::Failed(reason)) => reason.clone(),
             (Some(total), _) => format!(
                 "{} / {}",
@@ -191,6 +250,25 @@ impl TransferPanel {
             ),
             (None, _) => fmt::size(Some(task.done)),
         };
+        if let Some(group) = group {
+            detail = format!(
+                "{} / {} 文件 · {}{}{}",
+                group.completed,
+                group.files,
+                detail,
+                if group.failed > 0 {
+                    format!(" · {} 失败", group.failed)
+                } else {
+                    String::new()
+                },
+                if group.cancelled > 0 {
+                    format!(" · {} 已取消", group.cancelled)
+                } else {
+                    String::new()
+                }
+            );
+        }
+        let is_group = group.is_some();
 
         let detail_tooltip = detail.clone();
         let speed = task
@@ -200,14 +278,39 @@ impl TransferPanel {
         h_flex()
             .debug_selector(move || format!("transfer-row-{id}"))
             .flex_none()
+            .h(px(64.))
+            .w_full()
             .px_3()
+            .when(nested, |row| row.pl(px(44.)))
             .py_1p5()
             .gap_3()
             .items_center()
             .border_b_1()
             .border_color(cx.theme().border)
+            .when(is_group, |row| {
+                row.child(
+                    Button::new(("toggle-transfer-group", id as usize))
+                        .icon(if self.expanded.contains(&id) {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .ghost()
+                        .xsmall()
+                        .debug_selector(move || format!("transfer-group-toggle-{id}"))
+                        .tooltip("展开或折叠文件列表")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if !this.expanded.remove(&id) {
+                                this.expanded.insert(id);
+                            }
+                            this.rebuild_rows();
+                            cx.notify();
+                        })),
+                )
+            })
             .child(
                 Icon::new(match task.operation {
+                    roam_core::Operation::Download if is_group => IconName::Folder,
                     roam_core::Operation::Download => IconName::ArrowDown,
                     roam_core::Operation::Upload => IconName::ArrowUp,
                     roam_core::Operation::Copy => IconName::Copy,
@@ -251,12 +354,12 @@ impl TransferPanel {
                 div()
                     .w(px(160.))
                     .flex_none()
-                    .when_some(task.fraction(), |el, fraction| {
+                    .when_some(fraction, |el, fraction| {
                         el.child(Progress::new("task-progress").value(fraction * 100.))
                     })
                     // Without a total there is nothing honest to draw, so show
                     // the byte count only.
-                    .when(task.fraction().is_none(), |el| {
+                    .when(fraction.is_none(), |el| {
                         el.child(
                             div()
                                 .text_xs()
@@ -275,7 +378,11 @@ impl TransferPanel {
                         .xsmall()
                         .tooltip("重试")
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.engine.retry(id);
+                            if is_group {
+                                this.engine.retry_group(id);
+                            } else {
+                                this.engine.retry(id);
+                            }
                             this.refresh(cx);
                         })),
                 )
@@ -288,7 +395,11 @@ impl TransferPanel {
                     .tooltip("取消")
                     .disabled(finished)
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.engine.cancel(id);
+                        if is_group {
+                            this.engine.cancel_group(id);
+                        } else {
+                            this.engine.cancel(id);
+                        }
                         this.refresh(cx);
                     })),
             )
@@ -318,32 +429,49 @@ impl Render for TransferPanel {
                 )
                 .into_any_element()
         } else {
-            let rows: Vec<_> = self
-                .overview
-                .recent
-                .iter()
-                .map(|task| self.render_task(task, cx).into_any_element())
-                .collect();
-            v_flex()
+            div()
                 .id("transfer-tasks")
                 .debug_selector(|| "transfer-list".into())
                 .relative()
                 .flex_1()
                 .min_h_0()
-                .overflow_y_scroll()
-                .track_scroll(&self.scroll)
-                .children(rows)
-                .vertical_scrollbar(&self.scroll)
+                .child(
+                    uniform_list(
+                        "all-transfer-tasks",
+                        self.rows.len(),
+                        cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                            range
+                                .filter_map(|index| {
+                                    let row = this.rows.get(index)?.clone();
+                                    Some(match row {
+                                        Row::File { task, nested } => this
+                                            .render_task(&task.snapshot(), None, nested, cx)
+                                            .into_any_element(),
+                                        Row::Folder(folder) => {
+                                            let snapshot = folder.snapshot();
+                                            this.render_task(
+                                                &snapshot.task,
+                                                Some(&snapshot),
+                                                false,
+                                                cx,
+                                            )
+                                            .into_any_element()
+                                        }
+                                    })
+                                })
+                                .collect::<Vec<_>>()
+                        }),
+                    )
+                    .size_full()
+                    .track_scroll(&self.scroll),
+                )
+                .vertical_scrollbar(&self.scroll.0.borrow().base_handle)
                 .into_any_element()
         };
-        let note = if self.overview.total > self.overview.recent.len() {
-            format!(
-                "显示最近 {} 项任务 · 关闭窗口后传输继续",
-                self.overview.recent.len()
-            )
-        } else {
-            "关闭窗口后传输继续，可从主窗口左下角重新打开。".into()
-        };
+        let note = format!(
+            "全部 {} 个任务 · 文件夹可展开 · 关闭窗口后传输继续",
+            self.overview.total
+        );
         v_flex()
             .relative()
             .size_full()
@@ -366,5 +494,122 @@ impl Render for TransferPanel {
             )
             .children(Root::render_dialog_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui_kit::{
+        AppContext, Entity, Modifiers, ScrollStrategy, TestAppContext, VisualTestContext,
+    };
+    use roam_core::{Rt, Vfs, transfer::Transfer};
+    use std::{cell::RefCell, rc::Rc};
+
+    fn harness(
+        engine: TransferEngine,
+        cx: &mut TestAppContext,
+    ) -> (Entity<TransferPanel>, VisualTestContext) {
+        cx.background_executor.allow_parking();
+        cx.update(gpui_kit::init);
+        let holder = Rc::new(RefCell::new(None));
+        let output = holder.clone();
+        let window = cx.add_window(move |window, cx| {
+            let panel = cx.new(|cx| {
+                let mut panel = TransferPanel::new(engine, window, cx);
+                panel.refresh(cx);
+                panel
+            });
+            *output.borrow_mut() = Some(panel.clone());
+            Root::new(panel, window, cx)
+        });
+        let panel = holder.borrow_mut().take().unwrap();
+        (panel, VisualTestContext::from_window(window.into(), cx))
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn the_virtual_list_can_scroll_to_old_tasks_beyond_fifty(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let rt = Rt::new().unwrap();
+        let vfs = Vfs::local(rt.clone(), directory.path().to_str().unwrap()).unwrap();
+        let engine = TransferEngine::new(rt, 4);
+        engine.enqueue_all((0..120).map(|index| Transfer::Download {
+            vfs: vfs.clone(),
+            remote: "missing.txt".into(),
+            local: directory.path().join(format!("out-{index}")),
+            size: None,
+        }));
+        let (panel, mut visual) = harness(engine, cx);
+        draw(&mut visual);
+        assert_eq!(panel.read_with(&visual, |panel, _| panel.rows.len()), 120);
+        assert!(
+            visual.debug_bounds("transfer-row-1").is_none(),
+            "offscreen rows must be virtualized"
+        );
+        panel.update(&mut visual, |panel, cx| {
+            panel.scroll.scroll_to_item(119, ScrollStrategy::Top);
+            cx.notify();
+        });
+        draw(&mut visual);
+        assert!(
+            visual.debug_bounds("transfer-row-1").is_some(),
+            "the oldest task must remain reachable"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn folder_downloads_expand_into_children_and_collapse_again(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let rt = Rt::new().unwrap();
+        let vfs = Vfs::local(rt.clone(), directory.path().to_str().unwrap()).unwrap();
+        let engine = TransferEngine::new(rt, 4);
+        engine.enqueue_download_group(
+            "photos/",
+            (0..80)
+                .map(|index| Transfer::Download {
+                    vfs: vfs.clone(),
+                    remote: format!("photos/{index}.jpg").into(),
+                    local: directory.path().join(format!("out-{index}")),
+                    size: None,
+                })
+                .collect(),
+        );
+        let (panel, mut visual) = harness(engine, cx);
+        draw(&mut visual);
+        assert_eq!(panel.read_with(&visual, |panel, _| panel.rows.len()), 1);
+        let toggle = visual
+            .debug_bounds("transfer-group-toggle-1")
+            .unwrap()
+            .center();
+        visual.simulate_click(toggle, Modifiers::default());
+        draw(&mut visual);
+        assert_eq!(panel.read_with(&visual, |panel, _| panel.rows.len()), 81);
+        panel.update(&mut visual, |panel, cx| {
+            panel.scroll.scroll_to_item(80, ScrollStrategy::Top);
+            cx.notify();
+        });
+        draw(&mut visual);
+        assert!(
+            visual.debug_bounds("transfer-row-2").is_some(),
+            "expanded folders must expose every child"
+        );
+        panel.update(&mut visual, |panel, cx| {
+            panel.scroll.scroll_to_item(0, ScrollStrategy::Top);
+            cx.notify();
+        });
+        draw(&mut visual);
+        let toggle = visual
+            .debug_bounds("transfer-group-toggle-1")
+            .unwrap()
+            .center();
+        visual.simulate_click(toggle, Modifiers::default());
+        assert_eq!(panel.read_with(&visual, |panel, _| panel.rows.len()), 1);
     }
 }

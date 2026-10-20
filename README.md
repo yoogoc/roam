@@ -39,6 +39,11 @@ transfers running; use the transfer button at the bottom of the sidebar to
 reopen it. Progress, speed, cancellation, retries and completed-task cleanup
 are available in that window.
 
+Folder downloads appear as expandable groups with combined progress and file
+counts. Expand a group to inspect every file, or cancel and retry the whole
+group. The window shows the complete task history in a virtual scrolling list,
+with no task-count limit. Each download stays separate even when folder names match.
+
 Select files and folders with the row checkboxes, or use **⌘/Ctrl-click** to
 toggle individual entries and **Shift-click** to select a range. The header
 checkbox selects the current filtered list. A separate selection bar shows the

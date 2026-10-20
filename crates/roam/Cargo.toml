@@ -1,5 +1,6 @@
 [package]
 name = "roam"
+default-run = "roam"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

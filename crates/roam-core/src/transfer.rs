@@ -13,7 +13,7 @@
 //! mid-write and leave partial files behind with no chance to clean up.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -161,6 +161,7 @@ impl Transfer {
 pub struct TaskProgress {
     done: AtomicU64,
     cancelled: AtomicBool,
+    group: Option<Arc<DownloadGroup>>,
 }
 
 impl Default for TaskProgress {
@@ -176,11 +177,15 @@ impl TaskProgress {
         Self {
             done: AtomicU64::new(0),
             cancelled: AtomicBool::new(false),
+            group: None,
         }
     }
 
     pub fn advance(&self, bytes: u64) {
         self.done.fetch_add(bytes, Ordering::Relaxed);
+        if let Some(group) = &self.group {
+            group.done.fetch_add(bytes, Ordering::Relaxed);
+        }
     }
 
     pub fn done(&self) -> u64 {
@@ -218,11 +223,124 @@ struct TaskRecord {
     progress: Mutex<Arc<TaskProgress>>,
     state: Mutex<TaskState>,
     started: Mutex<Option<Instant>>,
+    group: Option<Arc<DownloadGroup>>,
 }
 
-/// A point-in-time view of a task, for rendering.
-/// What the transfer panel needs in order to draw: counts over everything, plus
-/// the handful of rows it actually shows.
+/// Incremental folder totals: rendering a collapsed folder never scans its
+/// files or locks every child on each progress update.
+struct DownloadGroup {
+    id: TaskId,
+    root: String,
+    label: Arc<str>,
+    count: usize,
+    total: Option<u64>,
+    done: AtomicU64,
+    remaining: AtomicUsize,
+    running: AtomicUsize,
+    completed: AtomicUsize,
+    failed: AtomicUsize,
+    cancelled: AtomicUsize,
+    started: Instant,
+}
+
+impl DownloadGroup {
+    fn finish(&self, state: &TaskState, was_running: bool) {
+        match state {
+            TaskState::Done => {
+                self.completed.fetch_add(1, Ordering::Relaxed);
+            }
+            TaskState::Failed(_) => {
+                self.failed.fetch_add(1, Ordering::Relaxed);
+            }
+            TaskState::Cancelled => {
+                self.cancelled.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => return,
+        }
+        if was_running {
+            self.running.fetch_sub(1, Ordering::Relaxed);
+        }
+        self.remaining.fetch_sub(1, Ordering::Release);
+    }
+}
+
+#[derive(Clone)]
+pub struct TransferHandle(Arc<TaskRecord>);
+
+impl TransferHandle {
+    pub fn snapshot(&self) -> TaskSnapshot {
+        TransferEngine::describe(&self.0)
+    }
+}
+
+#[derive(Clone)]
+pub struct DownloadGroupHandle {
+    group: Arc<DownloadGroup>,
+    pub children: Vec<TransferHandle>,
+}
+
+pub struct DownloadGroupSnapshot {
+    pub task: TaskSnapshot,
+    pub files: usize,
+    pub completed: usize,
+    pub failed: usize,
+    pub cancelled: usize,
+}
+
+impl DownloadGroupHandle {
+    pub fn id(&self) -> TaskId {
+        self.group.id
+    }
+
+    pub fn snapshot(&self) -> DownloadGroupSnapshot {
+        let group = &self.group;
+        let remaining = group.remaining.load(Ordering::Acquire);
+        let running = group.running.load(Ordering::Relaxed);
+        let failed = group.failed.load(Ordering::Relaxed);
+        let cancelled = group.cancelled.load(Ordering::Relaxed);
+        let done = group.done.load(Ordering::Relaxed);
+        let state = if remaining > 0 {
+            if running > 0 {
+                TaskState::Running
+            } else {
+                TaskState::Queued
+            }
+        } else if failed > 0 {
+            TaskState::Failed(format!("{failed} 个文件失败"))
+        } else if cancelled > 0 {
+            TaskState::Cancelled
+        } else {
+            TaskState::Done
+        };
+        let seconds = group.started.elapsed().as_secs_f64();
+        DownloadGroupSnapshot {
+            task: TaskSnapshot {
+                id: group.id,
+                label: group.label.clone(),
+                operation: Operation::Download,
+                state,
+                done,
+                total: group.total,
+                bytes_per_sec: (running > 0 && seconds > 0.05)
+                    .then(|| (done as f64 / seconds) as u64),
+                retryable: failed > 0,
+            },
+            files: group.count,
+            completed: group.completed.load(Ordering::Relaxed),
+            failed,
+            cancelled,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub enum TransferListItem {
+    Task(TransferHandle),
+    Folder(DownloadGroupHandle),
+}
+
+/// Global counts with an optional bounded set of recent snapshots. The
+/// virtual transfer list requests counts only and describes visible handles.
 #[derive(Debug, Clone)]
 pub struct TransferOverview {
     pub total: usize,
@@ -279,6 +397,7 @@ struct EngineInner {
     permits: Arc<Semaphore>,
     next_id: AtomicU64,
     tasks: Mutex<Vec<Arc<TaskRecord>>>,
+    revision: AtomicU64,
 }
 
 impl TransferEngine {
@@ -289,6 +408,7 @@ impl TransferEngine {
                 permits: Arc::new(Semaphore::new(concurrency.max(1))),
                 next_id: AtomicU64::new(1),
                 tasks: Mutex::new(Vec::new()),
+                revision: AtomicU64::new(0),
             }),
         }
     }
@@ -300,22 +420,128 @@ impl TransferEngine {
     }
 
     fn enqueue_record(&self, transfer: Transfer) -> Arc<TaskRecord> {
+        self.enqueue_record_in_group(transfer, None)
+    }
+
+    fn enqueue_record_in_group(
+        &self,
+        transfer: Transfer,
+        group: Option<Arc<DownloadGroup>>,
+    ) -> Arc<TaskRecord> {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+
+        let label = match (&group, &transfer) {
+            (Some(group), Transfer::Download { remote, .. }) => {
+                remote.strip_prefix(&group.root).unwrap_or(remote).into()
+            }
+            _ => transfer.label(),
+        };
 
         let record = Arc::new(TaskRecord {
             id,
-            label: transfer.label(),
+            label,
             operation: transfer.operation(),
             total: transfer.known_size(),
             transfer,
-            progress: Mutex::new(Arc::new(TaskProgress::new())),
+            progress: Mutex::new(Arc::new(TaskProgress {
+                group: group.clone(),
+                ..TaskProgress::new()
+            })),
             state: Mutex::new(TaskState::Queued),
             started: Mutex::new(None),
+            group,
         });
 
         self.inner.tasks.lock().unwrap().push(record.clone());
+        self.inner.revision.fetch_add(1, Ordering::Release);
         self.spawn_task(record.clone());
         record
+    }
+
+    /// Each invocation is a separate folder download, even for the same path.
+    pub fn enqueue_download_group(&self, folder: &str, transfers: Vec<Transfer>) -> Option<TaskId> {
+        if transfers.is_empty() {
+            return None;
+        }
+        let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+        let group = Arc::new(DownloadGroup {
+            id,
+            root: path::as_dir(folder),
+            label: path::basename(folder).into(),
+            count: transfers.len(),
+            total: transfers
+                .iter()
+                .map(Transfer::known_size)
+                .try_fold(0u64, |sum, size| {
+                    size.and_then(|size| sum.checked_add(size))
+                }),
+            done: AtomicU64::new(0),
+            remaining: AtomicUsize::new(transfers.len()),
+            running: AtomicUsize::new(0),
+            completed: AtomicUsize::new(0),
+            failed: AtomicUsize::new(0),
+            cancelled: AtomicUsize::new(0),
+            started: Instant::now(),
+        });
+        for transfer in transfers {
+            self.enqueue_record_in_group(transfer, Some(group.clone()));
+        }
+        Some(id)
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.inner.revision.load(Ordering::Acquire)
+    }
+
+    /// Lightweight handles for all tasks. Rebuild only when the list changes;
+    /// obtain progress snapshots for the virtual list's visible rows separately.
+    pub fn list_items(&self) -> Vec<TransferListItem> {
+        use std::collections::HashMap;
+        let tasks = self.inner.tasks.lock().unwrap();
+        let mut items = Vec::new();
+        let mut folders = HashMap::new();
+        for record in tasks.iter().rev() {
+            let task = TransferHandle(record.clone());
+            if let Some(group) = &record.group {
+                let index = *folders.entry(group.id).or_insert_with(|| {
+                    let index = items.len();
+                    items.push(TransferListItem::Folder(DownloadGroupHandle {
+                        group: group.clone(),
+                        children: Vec::new(),
+                    }));
+                    index
+                });
+                if let TransferListItem::Folder(folder) = &mut items[index] {
+                    folder.children.push(task);
+                }
+            } else {
+                items.push(TransferListItem::Task(task));
+            }
+        }
+        items
+    }
+
+    pub fn cancel_group(&self, id: TaskId) {
+        for record in self.inner.tasks.lock().unwrap().iter() {
+            if record.group.as_ref().is_some_and(|group| group.id == id)
+                && !record.state.lock().unwrap().is_finished()
+            {
+                record.progress.lock().unwrap().cancel();
+            }
+        }
+    }
+
+    pub fn retry_group(&self, id: TaskId) -> usize {
+        let ids: Vec<_> = self
+            .inner
+            .tasks
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|record| record.group.as_ref().is_some_and(|group| group.id == id))
+            .map(|record| record.id)
+            .collect();
+        ids.into_iter().filter(|id| self.retry(*id)).count()
     }
 
     pub fn enqueue_batch(&self, transfers: impl IntoIterator<Item = Transfer>) -> TransferBatch {
@@ -341,11 +567,18 @@ impl TransferEngine {
 
             // A task cancelled while it was still queued must not start.
             if progress.is_cancelled() {
-                *record.state.lock().unwrap() = TaskState::Cancelled;
+                let mut state = record.state.lock().unwrap();
+                *state = TaskState::Cancelled;
+                if let Some(group) = &record.group {
+                    group.finish(&state, false);
+                }
                 return;
             }
 
             *record.state.lock().unwrap() = TaskState::Running;
+            if let Some(group) = &record.group {
+                group.running.fetch_add(1, Ordering::Relaxed);
+            }
             *record.started.lock().unwrap() = Some(Instant::now());
 
             let outcome = run(&record.transfer, &progress).await;
@@ -356,6 +589,9 @@ impl TransferEngine {
                 Err(err) if err.is_cancelled() => TaskState::Cancelled,
                 Err(err) => TaskState::Failed(err.full_message()),
             };
+            if let Some(group) = &record.group {
+                group.finish(&state, true);
+            }
         });
     }
 
@@ -368,15 +604,27 @@ impl TransferEngine {
         let Some(record) = tasks.iter().find(|t| t.id == id).cloned() else {
             return false;
         };
-        if !matches!(*record.state.lock().unwrap(), TaskState::Failed(_)) {
+        let mut state = record.state.lock().unwrap();
+        if !matches!(*state, TaskState::Failed(_)) {
             return false;
         }
 
         // A fresh progress handle: the old one may carry a cancellation flag, and
         // the byte count restarts from whatever the pump can resume at.
-        *record.progress.lock().unwrap() = Arc::new(TaskProgress::new());
-        *record.state.lock().unwrap() = TaskState::Queued;
+        let mut progress = record.progress.lock().unwrap();
+        if let Some(group) = &record.group {
+            group.done.fetch_sub(progress.done(), Ordering::Relaxed);
+            group.failed.fetch_sub(1, Ordering::Relaxed);
+            group.remaining.fetch_add(1, Ordering::Release);
+        }
+        *progress = Arc::new(TaskProgress {
+            group: record.group.clone(),
+            ..TaskProgress::new()
+        });
+        *state = TaskState::Queued;
         *record.started.lock().unwrap() = None;
+        drop(progress);
+        drop(state);
         drop(tasks);
 
         self.spawn_task(record);
@@ -420,19 +668,37 @@ impl TransferEngine {
 
     /// Drop finished tasks from the list.
     pub fn clear_finished(&self) {
-        self.inner
-            .tasks
-            .lock()
-            .unwrap()
-            .retain(|record| !record.state.lock().unwrap().is_finished());
+        use std::collections::HashSet;
+        let mut tasks = self.inner.tasks.lock().unwrap();
+        // A folder is one history item. Retain its completed and failed files
+        // while siblings still run, keeping totals and group retry coherent.
+        let active_groups: HashSet<_> = tasks
+            .iter()
+            .filter_map(|record| {
+                record
+                    .group
+                    .as_ref()
+                    .filter(|group| group.remaining.load(Ordering::Acquire) > 0)
+                    .map(|group| group.id)
+            })
+            .collect();
+        tasks.retain(|record| {
+            record
+                .group
+                .as_ref()
+                .is_some_and(|group| active_groups.contains(&group.id))
+                || !record.state.lock().unwrap().is_finished()
+        });
+        self.inner.revision.fetch_add(1, Ordering::Release);
     }
 
-    /// Counts plus the newest few tasks — everything the panel draws.
+    /// Counts plus an optional number of recent snapshots.
     ///
     /// `snapshot()` clones every record and takes three locks per task. Dropping a
     /// folder of 100k files makes 100k tasks (one per file), and the panel polled
     /// ten times a second, so that was millions of lock acquisitions per second
-    /// spent on rows that were never drawn: the list shows fifty.
+    /// spent on offscreen rows. The virtual list uses a zero limit here and
+    /// obtains individual snapshots from its visible task handles.
     ///
     /// The counts still walk every record, but they only read one lock each and
     /// clone nothing.
@@ -1235,6 +1501,133 @@ mod tests {
             std::fs::read_to_string(target_guard.path().join("arrived.txt")).unwrap(),
             "hello"
         );
+    }
+
+    #[tokio::test]
+    async fn folder_downloads_group_files_and_keep_repeated_downloads_separate() {
+        let (_source, vfs) = fixture();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let entry = vfs
+            .list_all("")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.is_dir())
+            .unwrap();
+        let engine = TransferEngine::new(Rt::from_current().unwrap(), DEFAULT_CONCURRENCY);
+        let first_id = engine
+            .enqueue_download_group(
+                &entry.path,
+                plan_download(&vfs, &entry, first.path()).await.unwrap(),
+            )
+            .unwrap();
+        let second_id = engine
+            .enqueue_download_group(
+                &entry.path,
+                plan_download(&vfs, &entry, second.path()).await.unwrap(),
+            )
+            .unwrap();
+        assert_ne!(first_id, second_id);
+        settle(&engine).await;
+        let items = engine.list_items();
+        assert_eq!(items.len(), 2);
+        for item in items {
+            let TransferListItem::Folder(group) = item else {
+                panic!("expected folder");
+            };
+            let snapshot = group.snapshot();
+            assert_eq!(snapshot.files, 2);
+            assert_eq!(snapshot.completed, 2);
+            assert_eq!(snapshot.task.total, Some(6));
+            assert_eq!(snapshot.task.done, 6);
+            assert_eq!(snapshot.task.state, TaskState::Done);
+            assert_eq!(group.children.len(), 2);
+            assert!(
+                group
+                    .children
+                    .iter()
+                    .any(|child| child.snapshot().label.as_ref() == "nested/c.txt")
+            );
+        }
+        engine.clear_finished();
+        assert!(engine.list_items().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_folder_cancels_all_its_children_but_not_other_tasks() {
+        let (_source, vfs) = fixture();
+        let out = tempfile::tempdir().unwrap();
+        let entry = vfs
+            .list_all("")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.is_dir())
+            .unwrap();
+        let engine = TransferEngine::new(Rt::from_current().unwrap(), 1);
+        let permit = engine.inner.permits.clone().acquire_owned().await.unwrap();
+        let group_id = engine
+            .enqueue_download_group(
+                &entry.path,
+                plan_download(&vfs, &entry, out.path()).await.unwrap(),
+            )
+            .unwrap();
+        engine.enqueue(Transfer::Download {
+            vfs,
+            remote: "a.txt".into(),
+            local: out.path().join("a.txt"),
+            size: Some(5),
+        });
+        engine.cancel_group(group_id);
+        drop(permit);
+        settle(&engine).await;
+        let items = engine.list_items();
+        let TransferListItem::Task(single) = &items[0] else {
+            panic!("single file must stay separate");
+        };
+        assert_eq!(single.snapshot().state, TaskState::Done);
+        let TransferListItem::Folder(group) = &items[1] else {
+            panic!("expected folder");
+        };
+        let snapshot = group.snapshot();
+        assert_eq!(snapshot.cancelled, 2);
+        assert_eq!(snapshot.task.state, TaskState::Cancelled);
+        assert_eq!(snapshot.completed, 0);
+        assert!(!out.path().join("tree/b.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn retrying_a_folder_reuses_its_group_and_does_not_duplicate_successful_files() {
+        let (source, vfs) = fixture();
+        let out = tempfile::tempdir().unwrap();
+        let entry = vfs
+            .list_all("")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.is_dir())
+            .unwrap();
+        let plan = plan_download(&vfs, &entry, out.path()).await.unwrap();
+        std::fs::remove_file(source.path().join("tree/b.txt")).unwrap();
+        let engine = TransferEngine::new(Rt::from_current().unwrap(), DEFAULT_CONCURRENCY);
+        let id = engine.enqueue_download_group(&entry.path, plan).unwrap();
+        settle(&engine).await;
+        let TransferListItem::Folder(group) = engine.list_items().remove(0) else {
+            panic!("expected folder");
+        };
+        assert_eq!(group.snapshot().failed, 1);
+        assert_eq!(group.snapshot().completed, 1);
+        std::fs::write(source.path().join("tree/b.txt"), b"bee").unwrap();
+        assert_eq!(engine.retry_group(id), 1);
+        settle(&engine).await;
+        let snapshot = group.snapshot();
+        assert_eq!(snapshot.task.id, id);
+        assert_eq!(snapshot.failed, 0);
+        assert_eq!(snapshot.completed, 2);
+        assert_eq!(snapshot.task.done, 6);
+        assert_eq!(snapshot.task.state, TaskState::Done);
+        assert_eq!(engine.snapshot().len(), 2);
     }
 
     #[tokio::test]

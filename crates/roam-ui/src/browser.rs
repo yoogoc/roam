@@ -970,13 +970,7 @@ impl Browser {
                         return;
                     };
                     let _ = this.update_in(cx, |browser, window, cx| {
-                        browser.plan_and_queue("下载", window, cx, async move {
-                            let mut transfers = Vec::new();
-                            for entry in entries {
-                                transfers.extend(plan_download(&vfs, &entry, &dest).await?);
-                            }
-                            Ok(transfers)
-                        });
+                        browser.queue_downloads(vfs, entries, dest, window, cx);
                     });
                 }
                 Ok(Err(error)) => {
@@ -987,6 +981,64 @@ impl Browser {
                 // Cancelling the picker or closing its receiver queues nothing.
                 Ok(Ok(None)) | Err(_) => {}
             }
+        })
+        .detach();
+    }
+
+    fn queue_downloads(
+        &mut self,
+        vfs: Vfs,
+        entries: Vec<DirEntry>,
+        destination: std::path::PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let engine = self.engine.clone();
+        let notify = self.on_transfers_queued.clone();
+        let handle = window.window_handle();
+        cx.spawn(async move |_, cx| {
+            // Finish every plan before queueing: a failed directory listing
+            // must not leave an unnoticed partial batch running.
+            let mut plans = Vec::new();
+            let mut error = None;
+            for entry in entries {
+                match plan_download(&vfs, &entry, &destination).await {
+                    Ok(transfers) => plans.push((entry.is_dir().then_some(entry.path), transfers)),
+                    Err(err) => {
+                        error = Some(err);
+                        break;
+                    }
+                }
+            }
+            let count: usize = if error.is_none() {
+                plans.iter().map(|(_, transfers)| transfers.len()).sum()
+            } else {
+                0
+            };
+            let message = if let Some(error) = error {
+                error.full_message()
+            } else {
+                for (folder, transfers) in plans {
+                    if let Some(folder) = folder {
+                        engine.enqueue_download_group(&folder, transfers);
+                    } else {
+                        engine.enqueue_all(transfers);
+                    }
+                }
+                if count == 0 {
+                    "没有可下载的文件".into()
+                } else {
+                    format!("已加入 {count} 个下载任务")
+                }
+            };
+            let _ = handle.update(cx, |_, window, cx| {
+                window.push_notification(message, cx);
+                if count > 0
+                    && let Some(notify) = notify
+                {
+                    notify(window, cx);
+                }
+            });
         })
         .detach();
     }
@@ -1851,6 +1903,11 @@ pub(crate) mod tests {
                 .read_with(&self.cx, |browser, _| browser.engine.snapshot())
         }
 
+        pub(crate) fn transfer_items(&self) -> Vec<roam_core::transfer::TransferListItem> {
+            self.browser
+                .read_with(&self.cx, |browser, _| browser.engine.list_items())
+        }
+
         /// Planning is async and the engine runs on real tokio threads, so wait
         /// for both: first for tasks to appear, then for them all to finish.
         pub(crate) fn settle_transfers(&mut self) {
@@ -2481,6 +2538,12 @@ mod mutation_tests {
             b"xlsx"
         );
         assert!(h.path().join("documents/reports/q1.xlsx").exists());
+        let items = h.transfer_items();
+        assert_eq!(items.len(), 1);
+        let roam_core::transfer::TransferListItem::Folder(folder) = &items[0] else {
+            panic!("directory download must be grouped");
+        };
+        assert_eq!(folder.snapshot().files, 2);
     }
 
     #[gpui_kit::test]
