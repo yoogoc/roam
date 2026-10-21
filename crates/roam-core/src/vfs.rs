@@ -54,7 +54,7 @@ fn io_err(e: impl std::fmt::Display) -> Error {
 /// `opendal::Error` boxed inside. Unwrap it: otherwise a remote 404 is reported
 /// as "本地文件操作失败", which is both wrong and loses the `ErrorKind` that
 /// drives the message and the recovery action.
-fn stream_err(e: std::io::Error) -> Error {
+pub(crate) fn stream_err(e: std::io::Error) -> Error {
     match e.downcast::<opendal::Error>() {
         Ok(backend) => backend.into(),
         Err(local) => io_err(local),
@@ -761,6 +761,19 @@ impl Vfs {
 
             Ok((out, false))
         })
+    }
+
+    /// Preview a ZIP by reading its tail and central directory only. Archive
+    /// size is unlimited; metadata reads and displayed entries are bounded.
+    pub fn read_zip_tree(
+        &self,
+        path: &str,
+    ) -> impl Future<Output = Result<crate::preview::TreePreview>> + Send + 'static {
+        let op = self.inner.op.clone();
+        let path = path.to_string();
+        self.inner
+            .rt
+            .spawn(crate::preview::zip_directory::read(op, path))
     }
 
     /// Read at most `limit` bytes from the start of an object.

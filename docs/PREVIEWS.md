@@ -48,7 +48,14 @@ work without FFmpeg. Video playback is not currently embedded.
 
 ## Bounds
 
-- Text: first 128 KiB. Images: at most 8 MiB. ZIP: at most 32 MiB.
+- Text: first 128 KiB. Images: at most 8 MiB.
+- ZIP/ZIP64: no archive-size limit. Read object metadata, about 64 KiB from the
+  end, then at most 8 MiB from the central directory. Small directories already
+  in the tail need no second read. Display at most 2,000 central-directory
+  entries; the preview indicates truncation. File bodies are not decompressed
+  or downloaded in full. Conditional reads use a strong ETag when the backend
+  supports it; changes cause an error instead of mixing object revisions.
+  Split archives and encrypted/compressed central directories are unsupported.
 - Other whole-file previews: at most 64 MiB, including files of unknown size.
 - Trees: at most 2,000 entries/nodes. Compressed TAR traversal inflates at most
   128 MiB. Archive contents are never written to disk.
@@ -69,3 +76,18 @@ platform text/image rendering:
 ```sh
 cargo run -p roam-ui --example preview_panel -- /absolute/path/to/file
 ```
+
+To verify S3 ZIP range requests locally without cloud credentials (Postman CLI
+1.70+), start the committed HTTP simulation, then run the integration test in
+another terminal:
+
+```sh
+postman simulation run postman/simulations/s3-zip.sim.yaml --port 4900 --no-history --output ndjson
+ROAM_ZIP_S3_ENDPOINT=http://127.0.0.1:4900/s3 cargo test -p roam-core --test zip_ranges -- --nocapture
+```
+
+The fixtures model 64 MiB ZIP and 5 GiB ZIP64 objects without allocating their
+payloads. The server rejects missing ranges, payload reads and missing ETag
+conditions. The test also covers replacement (HTTP 412) and short responses.
+This verifies the real OpenDAL S3 HTTP path against the local model; it does not
+validate credentials, signatures or permissions against a live S3 account.

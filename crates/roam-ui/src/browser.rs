@@ -3028,6 +3028,23 @@ mod preview_tests {
     }
 
     #[gpui_kit::test]
+    fn a_zip_larger_than_the_old_limit_shows_its_tree(cx: &mut TestAppContext) {
+        let mut h = Harness::new(cx);
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        writer.start_file("large.bin", options).unwrap();
+        writer.write_all(&vec![0; 33 * 1024 * 1024]).unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+        h.write_file("large.zip", &bytes);
+        h.reload_now();
+        h.select_row("large.zip");
+        h.settle_preview();
+        assert_eq!(h.preview_state(), "tree");
+        assert_eq!(h.preview_body().unwrap(), "large.zip/\n└── large.bin\n");
+    }
+
+    #[gpui_kit::test]
     fn an_unlabelled_binary_is_caught_by_its_bytes(cx: &mut TestAppContext) {
         let mut h = Harness::new(cx);
         // Unknown extension, so classify() guesses text — the NUL byte is what

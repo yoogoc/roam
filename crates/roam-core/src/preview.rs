@@ -5,8 +5,6 @@
 //! object over the network just because someone tapped Space.
 
 use std::collections::BTreeMap;
-use std::io::Cursor;
-use std::path::Component;
 
 use crate::{DirEntry, path};
 
@@ -16,6 +14,7 @@ pub mod media;
 mod rtf;
 pub mod structured;
 pub mod tables;
+pub(crate) mod zip_directory;
 
 /// Whole-file previews use a private staging file and never exceed this size.
 pub const FILE_LIMIT: u64 = 64 * 1024 * 1024;
@@ -27,10 +26,6 @@ pub const TEXT_LIMIT: u64 = 128 * 1024;
 /// Images have to be fetched whole to decode, so the ceiling is higher but
 /// still bounded.
 pub const IMAGE_LIMIT: u64 = 8 * 1024 * 1024;
-
-/// A ZIP needs its central directory at the end of the file, so it cannot be
-/// previewed with a small ranged read. Keep the whole-archive download bounded.
-pub const ZIP_LIMIT: u64 = 32 * 1024 * 1024;
 
 /// Directory and archive trees stop here so a selection cannot allocate or
 /// render hundreds of thousands of rows.
@@ -162,10 +157,7 @@ pub fn classify(name: &str, size: Option<u64>) -> PreviewKind {
     }
 
     if ext == "zip" {
-        return match size {
-            Some(bytes) if bytes > ZIP_LIMIT => PreviewKind::None("ZIP 文件过大，暂不预览"),
-            _ => PreviewKind::Zip,
-        };
+        return PreviewKind::Zip;
     }
 
     let kind = if [
@@ -231,13 +223,12 @@ pub fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8192).any(|&b| b == 0)
 }
 
-/// How many bytes to request for `kind`.
+/// How many prefix bytes to request for `kind`; zero means metadata ranges.
 pub fn read_limit(kind: &PreviewKind) -> u64 {
     match kind {
         PreviewKind::Image(_) => IMAGE_LIMIT + 1,
-        // One extra byte distinguishes a complete archive at the limit from an
-        // unknown-size archive that exceeds it.
-        PreviewKind::Zip => ZIP_LIMIT + 1,
+        // ZIP has a dedicated metadata-range path, never a prefix download.
+        PreviewKind::Zip => 0,
         PreviewKind::Table
         | PreviewKind::Structured
         | PreviewKind::Pdf
@@ -356,48 +347,13 @@ pub fn directory_tree(
 /// Read only ZIP metadata and format it as a tree. File bodies are never
 /// decompressed, so unsupported compression methods do not prevent previewing.
 pub fn zip_tree(name: &str, bytes: &[u8]) -> Result<TreePreview, String> {
-    if bytes.len() as u64 > ZIP_LIMIT {
-        return Err("ZIP 文件过大，暂不预览".into());
-    }
-
-    let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
-        .map_err(|error| format!("无法读取 ZIP 目录：{error}"))?;
-    let mut root = TreeNode::default();
-    let mut accepted = 0usize;
-    let mut truncated = false;
-
-    for ix in 0..archive.len() {
-        let file = archive
-            .by_index_raw(ix)
-            .map_err(|error| format!("无法读取 ZIP 目录：{error}"))?;
-        let Some(enclosed) = file.enclosed_name() else {
-            continue;
-        };
-        let components: Vec<String> = enclosed
-            .components()
-            .filter_map(|component| match component {
-                Component::Normal(value) => Some(clean_component(&value.to_string_lossy())),
-                _ => None,
-            })
-            .collect();
-        if components.is_empty() {
-            continue;
-        }
-        if accepted == TREE_ENTRY_LIMIT {
-            truncated = true;
-            break;
-        }
-
-        root.insert(&components, file.is_dir());
-        accepted += 1;
-    }
-
-    Ok(finish_tree(name, root, truncated))
+    zip_directory::from_bytes(name, bytes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
     use std::io::Write;
 
     #[test]
@@ -450,13 +406,13 @@ mod tests {
     }
 
     #[test]
-    fn zip_files_are_previewable_up_to_the_download_limit() {
+    fn zip_preview_is_independent_of_archive_size() {
         assert_eq!(classify("files.ZIP", Some(1024)), PreviewKind::Zip);
         assert_eq!(
-            classify("huge.zip", Some(ZIP_LIMIT + 1)),
-            PreviewKind::None("ZIP 文件过大，暂不预览")
+            classify("huge.zip", Some(20 * 1024 * 1024 * 1024)),
+            PreviewKind::Zip
         );
-        assert_eq!(read_limit(&PreviewKind::Zip), ZIP_LIMIT + 1);
+        assert_eq!(read_limit(&PreviewKind::Zip), 0);
     }
 
     #[test]

@@ -1,0 +1,5 @@
+simulation: s3-zip-preview
+routing: path
+mocks:
+  - routeKey: s3
+    path: ../mocks/s3-zip/config.yaml

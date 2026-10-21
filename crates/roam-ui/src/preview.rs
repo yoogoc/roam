@@ -167,6 +167,21 @@ impl PreviewPanel {
             cx.notify();
             return;
         }
+        if kind == PreviewKind::Zip {
+            self.task = Some(cx.spawn(async move |this, cx| {
+                let state = match vfs.read_zip_tree(&path).await {
+                    Ok(tree) => tree_state(tree),
+                    Err(error) => State::Unavailable(error.full_message().into()),
+                };
+                let _ = this.update(cx, |this, cx| {
+                    if generation == this.generation {
+                        this.state = state;
+                        cx.notify();
+                    }
+                });
+            }));
+            return;
+        }
         let limit = preview::read_limit(&kind);
         self.task = Some(cx.spawn(async move |this, cx| {
             let state = match vfs.read_prefix(&path, limit).await {
